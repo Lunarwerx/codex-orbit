@@ -1,0 +1,54 @@
+{
+  "name": "codex-orbit",
+  "displayName": "Codex Orbit",
+  "description": "Power-up for Codex: rename, pin, star, search, and organize tasks.",
+  "version": "1.1.10",
+  "publisher": "LunarWerx",
+  "license": "MIT",
+  "icon": "media/codex-orbit.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Lunarwerx/codex-orbit"
+  },
+  "bugs": {
+    "url": "https://github.com/Lunarwerx/codex-orbit/issues"
+  },
+  "homepage": "https://github.com/Lunarwerx/codex-orbit#readme",
+  "keywords": ["codex", "openai", "chatgpt", "tasks", "patch", "ai"],
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Codex Orbit",
+      "properties": {
+        "codexOrbit.devMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Developer mode: uses the bundled patcher instead of fetching from GitHub. Poll interval reduced to 60s for rapid testing. Enable this when testing patcher changes locally."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexOrbit",
+          "title": "Codex Orbit",
+          "icon": "media/codex-orbit.png"
+        }
+      ]
+    },
+    "views": {
+      "codexOrbit": [
+        {
+          "type": "webview",
+          "id": "codexOrbit.sidebar",
+          "name": "Codex Orbit",
+          "icon": "media/codex-orbit.png"
+        }
+      ]
+    }
+  }
+}
