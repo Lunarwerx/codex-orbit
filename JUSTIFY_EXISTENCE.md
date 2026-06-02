@@ -224,3 +224,19 @@ full paths. So workspace identity = the cwd path, and Codex's
   `window.codexOrbitDump()`.
 
 **Verdict:** live. Bumped patcher `0.5.16 → 0.5.17`, archived as build #31.
+
+## Diagnostics affordance — "Copy diagnostics" (v0.5.18)
+
+**Files:** `stable/patch_codex.py`
+
+0.5.17 shipped the path-authoritative filter but the leak persisted with 0.5.17
+verified installed — so at runtime either `activeRoots` is empty or the wire threads
+carry no matching `cwd`, and I could not see which from outside the webview. **Job:**
+make the runtime truth (activeRoots, curRoot/curLabel, each thread's raw cwd/project)
+reachable without the webview devtools console, which is fiddly to target in VS Code.
+A right-click **"Copy diagnostics"** item (the menu already works) runs
+`codexOrbitDump()` — copies to clipboard, downloads `codex-orbit-debug.json`, and logs
+— and the dump now samples 40 threads + 6 raw wire objects so chats from the *leaking*
+workspaces are included. **Why vs. rejected:** guessing a fourth filter heuristic
+blind; this is the subtract-the-uncertainty move — read the data, then fix once. Permanent
+support value beyond this bug. **Verdict:** live. Bumped `0.5.17 → 0.5.18`, build #32.
