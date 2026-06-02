@@ -107,3 +107,33 @@ content, so the source PNG is the only place to fix it. **Primitive:** the singl
 and webview logo — one asset, all three usages corrected at once. (Author-supplied
 artwork; do not re-crop programmatically — it's manually tuned.) No version bump;
 VSIX rebuilt as build #5.
+
+## Strict-Module Syntax Gate + Dead Settings-Panel Removal (v0.5.14)
+
+**Files:** `stable/patch_codex.py`
+
+**Symptom:** the patched webview helper threw `Uncaught SyntaxError: Unexpected
+token '*'` at runtime. **Root cause:** the injected `SIDEBAR_IIFE` carried a dead
+inline settings-panel block (`showSettingsPanel`/`hideSettingsPanel`) that had been
+disabled by a `/* … */` wrap; an edit lost the opening `/*` but left the closing
+`*/`, so the block became live code followed by an orphaned comment-close — invalid
+in an ES module.
+
+- **Subtract, not patch.** The block was 100% dead — `showSettingsPanel` was never
+  called, `settingsVisible` never read, and `.coxSettingsPane`/`.coxSettingsBody`
+  were never created. So the fix is **deletion** of the whole block (and the orphan
+  `*/`), not re-adding a `/*` to preserve dead code. One source of truth; nothing
+  that shouldn't exist can break again.
+- **Why the blade missed it:** `verify()` ran `node --check <file>`. For a file with
+  `import`/`export`, Node auto-detects ESM but uses a **lenient** parser that accepts
+  an orphaned `*/` (exit 0) — while the webview's V8 module loader rejects it. So a
+  broken patch shipped with a green check. **Sharpened:** `verify()` now feeds the
+  helper to `node --input-type=module --check -` via stdin (encoding forced to UTF-8
+  for the ⭐📌🗑🪲 glyphs), the **same strict module parser the webview runs**. This
+  catches orphaned comment-closes and the whole "valid-as-script, invalid-as-module"
+  class before the VSIX is ever written. Regression-confirmed: the old broken helper
+  now fails the gate at line 422; the rebuilt helper passes.
+
+**Verdict:** live. Justified by the runtime crash it removes and the detection gap it
+closes. Bumped patcher `0.5.13 → 0.5.14`, archived to the rollback registry as
+build #28.
