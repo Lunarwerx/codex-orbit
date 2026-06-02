@@ -791,25 +791,30 @@ class SidebarProvider {
     this.log("Using Python: " + python);
 
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "codex-orbit-prev-"));
-    // Prefer the patcher bundled in the VSIX (offline, instant); only fetch from
-    // GitHub when this version isn't one we shipped with.
-    // The bundled baseline installs from the bundled stable patcher, which sits
-    // next to its codex_assets — one source of truth, no duplicated asset tree.
-    // Self-contained archived patchers (future baselines) live at patchers/<file>.
-    const stablePin = readBundledStableVersion(this.context);
-    const bundledStable = path.join(this.context.extensionUri.fsPath, "stable", "patch_codex.py");
+    // Roll back to the EXACT archived version: each entry.file is a self-contained
+    // snapshot (patchers/patch_codex-<ver>.py) — run THAT, never the live patcher,
+    // so "Use previous versions" reinstalls precisely the code that shipped as that
+    // version. Prefer the copy bundled in the VSIX (offline/instant); fetch from
+    // GitHub only when this version wasn't bundled with the installed wrapper.
     const bundledArchived = path.join(this.context.extensionUri.fsPath, "patchers", entry.file);
+    const bundledStable = path.join(this.context.extensionUri.fsPath, "stable", "patch_codex.py");
     let patcherPath;
-    if (entry.codex === stablePin && fs.existsSync(bundledStable)) {
-      patcherPath = bundledStable;
-      this.log("Using bundled baseline patcher (Codex " + entry.codex + ")");
-    } else if (fs.existsSync(bundledArchived)) {
+    if (fs.existsSync(bundledArchived)) {
       patcherPath = bundledArchived;
-      this.log("Using bundled patcher v" + entry.version);
+      this.log("Using bundled archived patcher v" + entry.version + " (" + entry.file + ")");
     } else {
       patcherPath = path.join(work, entry.file);
-      this.log("Downloading archived patcher v" + entry.version + " from GitHub");
-      await httpsDownload(OTA_PATCHERS_BASE + "/" + encodeURIComponent(entry.file) + "?t=" + Date.now(), patcherPath, OTA_TIMEOUT_MS * 4);
+      try {
+        this.log("Downloading archived patcher v" + entry.version + " from GitHub");
+        await httpsDownload(OTA_PATCHERS_BASE + "/" + encodeURIComponent(entry.file) + "?t=" + Date.now(), patcherPath, OTA_TIMEOUT_MS * 4);
+      } catch (e) {
+        if (fs.existsSync(bundledStable)) {
+          patcherPath = bundledStable;
+          this.log("Archived v" + entry.version + " unavailable — falling back to live patcher");
+        } else {
+          throw new Error("Patcher v" + entry.version + " is unavailable.");
+        }
+      }
     }
     this.checkCancelled();
 

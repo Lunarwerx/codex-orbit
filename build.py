@@ -136,6 +136,15 @@ def build(out: Path | None = None) -> Path:
     print(f"  known-good Codex:  {stable_version}")
     print(f"  patcher ver:       {patcher_version}")
 
+    # Snapshot the current patcher into the rollback registry BEFORE bundling, so
+    # every build preserves this version under patchers/ and the manifest grows.
+    # This is the "save every previous version" half of the picker — automatic,
+    # nothing to remember (mirrors Claude Code Orbit). Bundled below via patchers/.
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "tools"))
+    from archive_patcher import archive_current
+    archive_current(verbose=True, build_number=build_number)
+
     files_added: list[str] = []
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", CONTENT_TYPES)
