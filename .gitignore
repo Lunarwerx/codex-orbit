@@ -37,6 +37,7 @@ out/
 !builds/codex-orbit-build-*.vsix
 !builds/BUILD_LOG.md
 !latest/codex-orbit.vsix
+.tmp/
 .DS_Store
 Thumbs.db
 .vscode/settings.json
