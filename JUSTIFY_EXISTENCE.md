@@ -39,3 +39,71 @@ and should not be offered inside Codex Orbit.
 The stable pin is `26.5519.32039`, matching the bundled asset baseline. It
 should move only when a new stock Codex VSIX has been patched, verified, and
 promoted into `stable/codex_assets`.
+
+## Dynamic Patcher (supersedes asset-replay)
+
+**Files:** `stable/patch_codex.py`, `tools/gen_patch_spec.py`,
+`tools/build_dynamic_patcher.py`, `tools/emit_patcher.py`
+
+`stable/patch_codex.py` is now a **self-contained dynamic patcher**, replacing the
+asset-replay version. **Job:** make "Install newest" pull the newest Codex and
+patch it — like Claude Code Orbit. **Why vs. rejected:** asset-replay copied
+pre-captured minified files for ONE Codex build; Codex's webview asset filenames
+change every release, and the OTA loader ships only a single `.py` (no
+`codex_assets/` folder), so asset-replay produced both "Add a new baseline" and
+"Missing bundled Codex assets" failures. The dynamic patcher embeds the patch as
+anchored edits (gzip+base64) extracted from the verified baseline, locates each
+target file by content, applies what matches and **skips drifted anchors** rather
+than crashing — so a Codex always installs and gaps close via patcher pushes (no
+VSIX reinstall). **Primitive:** keeps the `copy_patched_assets` function name the
+Orbit wrapper's OTA loader requires as its accept marker. **Correctness gate:**
+reproduces `stable/codex_assets` byte-for-byte (modulo line endings) from stock
+26.5519; verified valid (`node --check`) on newest 26.5527. **Debt:** ~11
+version-specific edits (history wiring, host command registration, header) anchor
+on minified locals that drift; these need semantic re-anchoring + identifier
+capture (Claude Code Orbit's `_capture_*` pattern) — tracked, closed via pushes.
+
+## Version Picker (no "stable vs experimental")
+
+**Files:** `patchers/manifest.json`, `build.py`, `Codex Orbit/extension.js`
+
+Codex Orbit follows the Claude Code Orbit model: one list of verified
+(patcher, Codex) baselines, all equally "stable", and the user flips to a
+previous one if the newest misbehaves. There is no separate experimental mode.
+
+- `patchers/manifest.json` is the rollback registry the "Previous versions"
+  picker reads. `build.py` bundles `patchers/**` into the VSIX so the picker
+  works offline from first install. Each entry is `{version, codex, file,
+  build}`; today there is one baseline (patcher `0.3.1` → Codex `26.5519.32039`).
+- `enablePrevious()` installs the bundled baseline by reusing the bundled
+  `stable/patch_codex.py` (which carries its `codex_assets`) when
+  `entry.codex === stable pin` — one source of truth, no duplicated asset tree.
+  Self-contained archived patchers (future baselines) still load from
+  `patchers/<file>`.
+- `enable()` ("Install newest") now pins `--version` to the newest baseline we
+  have assets for instead of the Marketplace's newest. **Why:** the asset-replay
+  patcher fails closed on any unverified Codex, so chasing the Marketplace newest
+  guaranteed a broken install once OpenAI shipped past the baseline. A newer
+  Codex is surfaced as info, never patched blind.
+
+**Debt to grow the list:** because the patcher is asset-replay (not a dynamic
+patcher like Claude Code Orbit's), each new Codex version in the picker needs its
+own captured baseline via RELEASE_RULES "Promoting A New Codex Version". A
+dynamic Codex patcher would remove that per-version cost and give full version
+parity with Claude Code Orbit.
+
+## Icon Canvas Trim
+
+**File:** `Codex Orbit/media/codex-orbit.png`
+
+The shipped logo is a 1254×1254 PNG whose glyph fills the full canvas width
+(content fill 100%×74%, natural aspect preserved). **Job:** render at the same
+visual size as sibling icons in the activity bar and the webview hero. **Why vs.
+rejected:** the prior canvas baked ~40% transparent vertical padding (60% height
+fill), so it rendered tiny next to the 95–100%-fill recommendation icons; CSS
+`object-fit` can't recover this because transparent pixels count as image
+content, so the source PNG is the only place to fix it. **Primitive:** the single
+`media/codex-orbit.png` reused for the package icon, activity-bar container icon,
+and webview logo — one asset, all three usages corrected at once. (Author-supplied
+artwork; do not re-crop programmatically — it's manually tuned.) No version bump;
+VSIX rebuilt as build #5.
