@@ -44,3 +44,19 @@ push is never catastrophic.
   patch run mutated.
 - **Do not lecture the user about what you can/can't verify.** Fix, bump, push.
   The user verifies by installing and reporting. That IS the verification.
+
+## Every version is saved forever (the rollback registry)
+
+`python build.py` automatically calls `tools/archive_patcher.py`, which snapshots
+the current `stable/patch_codex.py` into `patchers/patch_codex-<version>.py` and
+upserts an entry in `patchers/manifest.json` (keyed by `patcher_version.txt`).
+**It never deletes older entries.** So the loop is: bump `patcher_version.txt`
+→ `python build.py` (archives the new version, keeps every old one) → push
+`patchers/` + `latest/codex-orbit.vsix`. "Use previous versions" then lists every
+version ever shipped, and a rollback runs that EXACT archived file
+(`enablePrevious` loads `patchers/<entry.file>`, never the live patcher).
+
+NEVER hand-prune `patchers/` or the manifest. Bumping the patcher version without
+running `build.py` would skip the archive — always build so the snapshot happens.
+This is the CCO model; it is the user's #1 requirement: every previous version
+stays installable so a bad push is always one click from recovery.
