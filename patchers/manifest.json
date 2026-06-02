@@ -91,6 +91,13 @@
       "codex": "26.5519.32039",
       "file": "patch_codex-0.5.9.py",
       "date": "2026-06-02"
+    },
+    {
+      "version": "0.5.10",
+      "build": 21,
+      "codex": "26.5519.32039",
+      "file": "patch_codex-0.5.10.py",
+      "date": "2026-06-02"
     }
   ]
 }
