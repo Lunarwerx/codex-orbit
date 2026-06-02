@@ -130,12 +130,26 @@ import{Jr as e,ai as t,ci as n,hi as r,li as i,mi as a,ni as o}from"./src-E5Oyj7
     }
 
     function sourceCandidates() {
-      return Array.from(document.querySelectorAll("div.overscroll-contain"))
-        .filter((element) => element.querySelector("[data-app-action-sidebar-thread-row]"))
-        .sort((left, right) =>
-          right.querySelectorAll("[data-app-action-sidebar-thread-row]").length -
-          left.querySelectorAll("[data-app-action-sidebar-thread-row]").length
-        );
+      // Locate the native chat list by the thread rows' OWN stable data-attribute,
+      // never by a CSS class — classes like "overscroll-contain" get renamed every
+      // Codex release (that rename is exactly what emptied this panel on 26.5527).
+      // The list container = the element holding the most thread rows; ties go to
+      // the deepest (tightest) one. Resilient to future webview refactors.
+      const rows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-row]"));
+      if (!rows.length) return [];
+      const counts = new Map();
+      for (const row of rows) {
+        let node = row.parentElement, depth = 0;
+        while (node && node !== document.body && depth < 16) {
+          counts.set(node, (counts.get(node) || 0) + 1);
+          node = node.parentElement; depth += 1;
+        }
+      }
+      return Array.from(counts.keys()).sort((left, right) => {
+        const byCount = counts.get(right) - counts.get(left);
+        if (byCount) return byCount;
+        return left.contains(right) ? 1 : (right.contains(left) ? -1 : 0);
+      });
     }
 
     function findSource() {
