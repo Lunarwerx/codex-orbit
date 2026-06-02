@@ -240,3 +240,30 @@ A right-click **"Copy diagnostics"** item (the menu already works) runs
 workspaces are included. **Why vs. rejected:** guessing a fourth filter heuristic
 blind; this is the subtract-the-uncertainty move — read the data, then fix once. Permanent
 support value beyond this bug. **Verdict:** live. Bumped `0.5.17 → 0.5.18`, build #32.
+
+## Workspace Filtering — found "current" via the open chat / RPC (v0.5.19)
+
+**Files:** `stable/patch_codex.py`
+
+Root cause, found by reading Codex's own bundle (not guessing): the sidebar already
+knows every chat's project (that is why grouping works) — the gap was knowing which
+project is **current**. Codex delivers `active-workspace-roots` as an **RPC response**
+(`"active-workspace-roots":async()=>({roots:...})`, read on the webview as
+`(...active-workspace-roots...).roots?.[0]` via React Query), NOT a typed broadcast —
+so our window-message interceptor (`findRoots`) never matched it, `curRoot/curLabel`
+stayed empty, and `currentRows` punted to "show all".
+
+- **`findRoots` now deep-scans** any incoming message for a `roots` array of paths
+  (catches the `{...,result:{roots:[...]}}` RPC reply shape, wherever nested).
+- **`openThreadId()` + URL-first `currentRows`:** the open chat's id is in the route
+  (`/local/<id>`, `/remote/<id>`, `/worktree-init*/<id>` — confirmed in the bundle), and
+  that chat is by definition in the current workspace. We resolve it to a thread and use
+  its project/cwd as "home" — a transport-independent signal needing no message
+  interception. Captured roots and an active-flagged chat are fallbacks.
+- **`inCurrent`** already filters by exact project name when a chat carries no cwd, so
+  once `curLabel` is set from the open chat's project, only that workspace's chats stay.
+
+**Why vs. rejected:** chasing a per-chat `cwd` on the wire was the wrong axis — the
+discriminator we reliably have is the project label; the missing piece was just "which
+label is current", which the URL hands us directly. **Verdict:** live. Bumped
+`0.5.18 → 0.5.19`, archived as build #33.
