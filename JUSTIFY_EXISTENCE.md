@@ -137,3 +137,31 @@ in an ES module.
 **Verdict:** live. Justified by the runtime crash it removes and the detection gap it
 closes. Bumped patcher `0.5.13 → 0.5.14`, archived to the rollback registry as
 build #28.
+
+## Sidebar Click Delegation (v0.5.15)
+
+**Files:** `stable/patch_codex.py`
+
+**Symptom:** right-click → "Open" navigated a chat, but a plain left-click on the
+same row did nothing. **Root cause:** the sidebar's `MutationObserver` (watching the
+whole document) re-runs `render()` ~constantly as Codex's webview mutates, and
+`render()` does `list.textContent=""` then rebuilds every row as a NEW `<button>`.
+Per-row `click` listeners died with their buttons: a render landing between mousedown
+and mouseup left the two on different elements, so the browser emitted no `click`.
+The right-click menu was immune only because `.coxMenu` lives on `document.body`,
+outside the re-rendered `.coxList`.
+
+- **Fix the class, not the row.** Every interactive element inside `.coxList` (rows
+  AND group headers) had the same defect. So routing moved to **event delegation on
+  the persistent `.coxList`** — one `click` + one `contextmenu` listener attached once
+  in `ensureShell()`. `.coxList` survives `render()` (only its children are replaced),
+  and the browser dispatches `click` to it as the common ancestor even when the inner
+  button is swapped mid-gesture, so the whole re-render-eats-the-click class is gone.
+- **Primitive:** a `WeakMap` (row `<button>` → thread) set in `addRow`, read by the
+  delegated handler; group collapse keyed by a `data-cox-group` attribute. One lookup
+  path, no duplicated routing logic. Per-row/per-group listeners deleted.
+- **Why vs. rejected:** diffing the list instead of full-rebuild, or pausing the
+  observer during a click, both add state and still leave the click on a doomed
+  element; delegation is the standard, minimal answer and needs no render rewrite.
+
+**Verdict:** live. Bumped patcher `0.5.14 → 0.5.15`, archived as build #29.
