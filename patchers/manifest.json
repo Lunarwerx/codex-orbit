@@ -70,6 +70,13 @@
       "codex": "26.5519.32039",
       "file": "patch_codex-0.5.6.py",
       "date": "2026-06-02"
+    },
+    {
+      "version": "0.5.7",
+      "build": 18,
+      "codex": "26.5519.32039",
+      "file": "patch_codex-0.5.7.py",
+      "date": "2026-06-02"
     }
   ]
 }
