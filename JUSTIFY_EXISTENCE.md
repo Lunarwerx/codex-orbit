@@ -193,3 +193,34 @@ constant full rebuild pegged the webview ("might have crashed").
 
 **Verdict:** live. Bumped patcher `0.5.15 → 0.5.16`, archived as build #30. Delegation
 (v0.5.15) stays — it is correct *given* the row now survives the gesture.
+
+## Workspace Filtering — path-authoritative (v0.5.17)
+
+**Files:** `stable/patch_codex.py`
+
+The sidebar intercepts Codex's *full* wire thread list (every workspace) and filters
+it to the current one. It was leaking other workspaces' chats (Connections, SayDeploy,
+…). Ground truth (verified on disk): every Codex session's `rollout-*.jsonl`
+`session_meta` carries an absolute `cwd`, and the ~10 active workspaces have distinct
+full paths. So workspace identity = the cwd path, and Codex's
+`active-workspace-roots[0]` is that path for the open window.
+
+- **Make the path decide, first.** `currentRows` now calls
+  `setCurrent(activeRoots[0], …)` before any label/native heuristic, and only falls
+  back to the open chat's cwd if roots haven't arrived — an opened cross-workspace chat
+  no longer hijacks the filter. `inCurrent` treats any thread that carries a `cwd` as
+  decided by PATH alone (exact workspace or a subfolder); the folder-basename / project
+  label match that leaked same-named or mislabeled threads is gone, kept only for the
+  degenerate case of a thread with no cwd at all.
+- **Why vs. rejected:** label/basename matching is inherently ambiguous across
+  workspaces; the native-sidebar scope can't help because Codex may list all
+  workspaces and DOM rows carry no cwd. The full path is the only unambiguous key, and
+  Codex already hands it to us via `active-workspace-roots`.
+- **Open risk (tracked):** effectiveness depends on the *wire* thread objects carrying
+  `cwd`/`workingDirectory` (the on-disk session has it; the host may or may not forward
+  it). `normalizeRaw` already extracts it and the fallbacks prevent an empty list, so
+  this is regression-safe either way. If wire data lacks cwd, the next step is a
+  host-side thread-id→cwd map read from `~/.codex/sessions`. Confirm via
+  `window.codexOrbitDump()`.
+
+**Verdict:** live. Bumped patcher `0.5.16 → 0.5.17`, archived as build #31.
