@@ -25,6 +25,7 @@ STABLE_PATCHER_VERSION_SRC = STABLE_DIR / "patcher_version.txt"
 STABLE_README_SRC = STABLE_DIR / "README.md"
 README_SRC = ROOT / "README.md"
 BUILDS_DIR = ROOT / "builds"
+PATCHERS_DIR = ROOT / "patchers"
 LATEST_DIR = ROOT / "latest"
 LATEST_VSIX = LATEST_DIR / "codex-orbit.vsix"
 WRAPPER_VERSION_SRC = ROOT / "wrapper_version.txt"
@@ -163,6 +164,13 @@ def build(out: Path | None = None) -> Path:
             f"extension/patch_version.txt ({patcher_version})",
             f"extension/STABLE_VERSION.txt ({stable_version})",
         ])
+
+        # Rollback registry: the "Previous versions" picker reads
+        # extension/patchers/manifest.json. Bundling it makes the picker work
+        # offline from the moment Orbit is installed — every entry is a verified
+        # (patcher, Codex) baseline the user can flip to.
+        if PATCHERS_DIR.exists():
+            add_tree(zf, files_added, PATCHERS_DIR, "extension/patchers")
 
         if STABLE_README_SRC.exists():
             add_file(zf, files_added, STABLE_README_SRC, "extension/stable/README.md")
