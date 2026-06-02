@@ -32,3 +32,4 @@ a build.
 - **Build #27** - `codex-orbit-build-27.vsix` - pkg 1.1.12, stable Codex 26.5519.32039, patcher 0.5.13 - 2026-06-02 13:07:00
 - **Build #28** - `codex-orbit-build-28.vsix` - pkg 1.1.12, stable Codex 26.5519.32039, patcher 0.5.14 - 2026-06-02 13:30:00
 - **Build #29** - `codex-orbit-build-29.vsix` - pkg 1.1.12, stable Codex 26.5519.32039, patcher 0.5.15 - 2026-06-02 13:57:18
+- **Build #30** - `codex-orbit-build-30.vsix` - pkg 1.1.12, stable Codex 26.5519.32039, patcher 0.5.16 - 2026-06-02 14:08:22

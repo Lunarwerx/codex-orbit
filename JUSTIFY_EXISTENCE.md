@@ -165,3 +165,31 @@ outside the re-rendered `.coxList`.
   element; delegation is the standard, minimal answer and needs no render rewrite.
 
 **Verdict:** live. Bumped patcher `0.5.14 → 0.5.15`, archived as build #29.
+
+## Render-Storm Fix — the real reason rows wouldn't open (v0.5.16)
+
+**Files:** `stable/patch_codex.py`
+
+v0.5.15's delegation was the right pattern for the wrong model. The true cause:
+`start()` observed `document.documentElement` (whole subtree, `childList`), and
+`render()` rewrites our own `.coxList` — which is *inside* that subtree. So every
+render scheduled the next one **~80ms later, forever**: a self-sustaining storm that
+rebuilt the list ~12×/s even at idle. Consequences: (1) a rebuild almost always landed
+between a row's `pointerdown` and `mouseup`, and **Chromium fires no `click` when the
+mousedown target has been detached** — so delegation had nothing to catch; (2) the
+constant full rebuild pegged the webview ("might have crashed").
+
+- **Cut the self-trigger.** The observer now skips mutations where
+  `shell.contains(m.target)` — it reacts only to *real* Codex changes, not to its own
+  writes. Renders go from 12×/s-forever to rare/on-demand. This is the subtraction
+  that matters: the storm simply stops existing.
+- **Freeze during the gesture.** `interacting` is set on `pointerdown` in `.coxList`
+  (and clears any pending render), released on `pointerup`/`pointercancel`;
+  `scheduleRender()` early-returns while set. The pressed row now survives to `mouseup`,
+  so a genuine `click` fires and the (kept) delegated handler routes it.
+- **Why vs. rejected:** diffing the list or disconnecting the observer per-render are
+  heavier and still leave the idle storm's root (self-observation) in place; filtering
+  our own subtree out is the one-line removal of the actual cause.
+
+**Verdict:** live. Bumped patcher `0.5.15 → 0.5.16`, archived as build #30. Delegation
+(v0.5.15) stays — it is correct *given* the row now survives the gesture.
