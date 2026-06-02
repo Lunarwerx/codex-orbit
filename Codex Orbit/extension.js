@@ -752,14 +752,14 @@ class SidebarProvider {
         await this.context.globalState.update(GS_REMOTE_PATCHER_VERSION, remoteVersion);
       }
     }
-    const args = [STOCK_ID, "--out", out, "--download-dir", work, "--patcher-version", patcherVersion];
-    if (useStable) {
-      const stable = readBundledStableVersion(this.context);
-      args.push("--version", stable);
-      this.log("Downloading + patching stable " + STOCK_ID + " v" + stable + " (patcher v" + patcherVersion + ", " + patcherSource + ")");
-    } else {
-      this.log("Downloading + patching experimental " + STOCK_ID + " (patcher v" + patcherVersion + ", " + patcherSource + ")");
-    }
+    // Every shipped version is a verified (patcher, Codex) baseline — there is no
+    // "experimental, chase-the-newest" mode. Pin to the newest Codex we actually
+    // have assets for so the install always succeeds; a newer Codex on the
+    // Marketplace is surfaced as info, never patched blind (the asset-replay
+    // patcher fails closed on an unverified build, which is what bricks "newest").
+    const targetCodex = readBundledStableVersion(this.context);
+    const args = [STOCK_ID, "--out", out, "--download-dir", work, "--patcher-version", patcherVersion, "--version", targetCodex];
+    this.log("Downloading + patching " + STOCK_ID + " v" + targetCodex + " (patcher v" + patcherVersion + ", " + patcherSource + ")");
     this.checkCancelled();
     await runPython(python, patcher, args, (line) => this.log(line), (proc) => { this.activeProc = proc; });
     this.activeProc = null;
@@ -793,10 +793,18 @@ class SidebarProvider {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "codex-orbit-prev-"));
     // Prefer the patcher bundled in the VSIX (offline, instant); only fetch from
     // GitHub when this version isn't one we shipped with.
-    const bundled = path.join(this.context.extensionUri.fsPath, "patchers", entry.file);
+    // The bundled baseline installs from the bundled stable patcher, which sits
+    // next to its codex_assets — one source of truth, no duplicated asset tree.
+    // Self-contained archived patchers (future baselines) live at patchers/<file>.
+    const stablePin = readBundledStableVersion(this.context);
+    const bundledStable = path.join(this.context.extensionUri.fsPath, "stable", "patch_codex.py");
+    const bundledArchived = path.join(this.context.extensionUri.fsPath, "patchers", entry.file);
     let patcherPath;
-    if (fs.existsSync(bundled)) {
-      patcherPath = bundled;
+    if (entry.codex === stablePin && fs.existsSync(bundledStable)) {
+      patcherPath = bundledStable;
+      this.log("Using bundled baseline patcher (Codex " + entry.codex + ")");
+    } else if (fs.existsSync(bundledArchived)) {
+      patcherPath = bundledArchived;
       this.log("Using bundled patcher v" + entry.version);
     } else {
       patcherPath = path.join(work, entry.file);
@@ -1194,6 +1202,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
         Restart Codex
       </button>
       <button class="btn" data-action="back">Back</button>
+      <button class="altAction globalVersions" hidden>Use previous versions</button>
     </div>
 
     <!-- VERSIONS (picker) -->
@@ -1221,6 +1230,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
       <p class="errorSub" id="errorSub"></p>
       <button class="btn primary" data-action="enable">Install newest</button>
       <button class="btn" data-action="back">Back</button>
+      <button class="altAction globalVersions" hidden>Use previous versions</button>
     </div>
 
   </div>
@@ -1477,6 +1487,19 @@ versionsBtn.addEventListener("click", function () {
   setPane("versions");
 });
 
+// "Use previous versions" links on the done/error panes — the same picker, kept
+// one click away on every pane (except the working/downloading step) so a bad
+// install is always immediately reversible. This is the product's whole safety
+// net: when a pushed patcher misbehaves, roll back to the last good one.
+const globalVersionsBtns = Array.prototype.slice.call(document.querySelectorAll(".globalVersions"));
+globalVersionsBtns.forEach(function (b) {
+  b.addEventListener("click", function () { renderVersions(); setPane("versions"); });
+});
+function refreshGlobalVersions() {
+  const has = (lastHistory || []).some(function (v) { return v && v.version; });
+  globalVersionsBtns.forEach(function (b) { b.hidden = !has; });
+}
+
 // Confirm step → kick off the real install (working pane has the Cancel button).
 confirmInstallBtn.addEventListener("click", function () {
   if (!pendingEntry) return;
@@ -1662,6 +1685,7 @@ window.addEventListener("message", (ev) => {
     });
     lastHistory = Array.isArray(m.patcherHistory) ? m.patcherHistory : [];
     lastInstalledVersion = m.installedVersion || null;
+    refreshGlobalVersions();
     return;
   }
   if (m.type === "log") {

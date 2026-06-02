@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "patchers": [
+    {
+      "version": "0.4.0",
+      "codex": "26.5519.32039",
+      "file": "patch_codex.py",
+      "build": 2
+    }
+  ]
+}
