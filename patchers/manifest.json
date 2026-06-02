@@ -28,6 +28,13 @@
       "codex": "26.5519.32039",
       "file": "patch_codex-0.5.0.py",
       "date": "2026-06-02"
+    },
+    {
+      "version": "0.5.1",
+      "build": 12,
+      "codex": "26.5519.32039",
+      "file": "patch_codex-0.5.1.py",
+      "date": "2026-06-02"
     }
   ]
 }
