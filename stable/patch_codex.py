@@ -84,11 +84,21 @@ def download_marketplace_vsix(item, dest_dir, version=None, target_platform=None
     pkg = next(f for f in sel["files"] if f.get("assetType", "").endswith("VSIXPackage"))
     pub = ext["publisher"]["publisherName"]; name = ext["extensionName"]
     sp = sel.get("targetPlatform"); suf = f"-{sp}" if sp else ""
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{pub}.{name}-{sel['version']}{suf}.vsix"
+    fname = f"{pub}.{name}-{sel['version']}{suf}.vsix"
+    # Cache the (large) stock VSIX across runs so iterating on the patcher does
+    # not re-download hundreds of MB each click. Keyed by version+platform, so a
+    # genuinely newer Codex still triggers a fresh download.
+    cache = Path(tempfile.gettempdir()) / "codex-orbit-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / fname
+    if dest.exists() and dest.stat().st_size > 1_000_000:
+        log(f"Using cached Codex VSIX ({dest.stat().st_size} bytes): {fname}")
+        return dest
     log(f"Downloading {pub}.{name} {sel['version']} {sp or 'platform-neutral'}")
-    urllib.request.urlretrieve(pkg["source"], dest)
-    log(f"Downloaded VSIX size: {dest.stat().st_size} bytes")
+    part = dest.with_name(dest.name + ".part")
+    urllib.request.urlretrieve(pkg["source"], part)
+    part.replace(dest)  # atomic: never leave a half-downloaded file in cache
+    log(f"Downloaded VSIX size: {dest.stat().st_size} bytes (cached)")
     return dest
 
 def assert_codex(ext_dir):
