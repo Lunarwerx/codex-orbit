@@ -314,14 +314,12 @@ SIDEBAR_IIFE = r"""
     function hostPost(type,payload){ try{ if(typeof window.__codexPostMessage==="function"){ window.__codexPostMessage(type,payload||{}); return true; } }catch{} return false; }
     function routeTo(path){
       // 1) Try host message (reliable — Codex's extension host handles routing).
-      if(hostPost("navigate-to-route",{path})) return true;
-      // 2) Try app-level message.
-      if(appPost("navigate-to-route",{path})) return true;
-      // 3) Try React Router pushState + popstate.
-      if(navTo(path)) return true;
-      // 4) Hard fallback: change location directly. Not pretty, but WORKS.
-      try{ window.location.href=path; return true; }catch{}
-      return false;
+      let ok=false;
+      ok=hostPost("navigate-to-route",{path})||ok;
+      ok=appPost("navigate-to-route",{path})||ok;
+      ok=navTo(path)||ok;
+      setTimeout(()=>{ try{ if(location.pathname!==path) window.location.href=path; }catch{} },120);
+      return ok;
     }
     const titleKey=(s)=>clean(s).replace(/^⭐\s*/,"").replace(/^📌\s*/,"");
     function clickTarget(el){
@@ -689,16 +687,16 @@ def expose_native_openers(wv):
     for f in wv.glob("*.js"):
         text = f.read_text(encoding="utf-8", errors="ignore")
         changed = False
-        if local_old_anchor in text and "__codexOrbitLocalOpeners" not in text:
+        if local_old_anchor in text and "(window.__codexOrbitLocalOpeners||" not in text:
             text = text.replace(local_old_anchor, local_old_bridge + local_old_anchor, 1)
             changed = True
-        if local_new_anchor in text and "__codexOrbitLocalOpeners" not in text:
+        if local_new_anchor in text and "(window.__codexOrbitLocalOpeners||" not in text:
             text = text.replace(local_new_anchor, local_new_bridge + local_new_anchor, 1)
             changed = True
-        if remote_old_anchor in text and "__codexOrbitRemoteOpeners" not in text:
+        if remote_old_anchor in text and "(window.__codexOrbitRemoteOpeners||" not in text:
             text = text.replace(remote_old_anchor, remote_old_bridge, 1)
             changed = True
-        if remote_new_anchor in text and "__codexOrbitRemoteOpeners" not in text:
+        if remote_new_anchor in text and "(window.__codexOrbitRemoteOpeners||" not in text:
             text = text.replace(remote_new_anchor, remote_new_bridge, 1)
             changed = True
         if changed:

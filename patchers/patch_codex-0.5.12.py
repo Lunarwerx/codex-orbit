@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse, datetime as dt, json, platform, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-__version__ = "0.5.13"
+__version__ = "0.5.12"
 DEFAULT_MARKETPLACE_ITEM = "openai.chatgpt"
 MARKETPLACE_QUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
 LOG_PATH = None
@@ -38,6 +38,7 @@ SIDEBAR_IIFE = r"""
     const IC={
       search:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.3"/><line x1="10.3" y1="10.3" x2="14" y2="14" stroke-linecap="round"/></svg>',
       plus:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="8" y1="3.2" x2="8" y2="12.8"/><line x1="3.2" y1="8" x2="12.8" y2="8"/></svg>',
+      back:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="10,3 5.5,8 10,13"/></svg>',
       chev:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="6.5,3.5 11,8 6.5,12.5"/></svg>'
     };
 
@@ -202,19 +203,7 @@ SIDEBAR_IIFE = r"""
       if(a) setCurrent(a.cwd,a.project);
       // Codex's own active-workspace-roots[0], when we caught the message.
       if(activeRoots[0]) setCurrent(activeRoots[0],lastSeg(activeRoots[0]));
-      // NEVER show all projects. When we don't know the workspace yet, show ONLY
-      // threads that are active/current (the open chat). An empty list with a hint
-      // is better than leaking every project into the sidebar. The first open chat
-      // or intercepted message will set curRoot/curLabel and the list populates.
-      if(!curRoot&&!curLabel){
-        const actives=rows.filter((t)=>t.current||t.active);
-        if(actives.length){ try{window.__codexOrbitCurrentProject=null;}catch{} return actives; }
-        // Last resort: if there's NOTHING active, show the first few rows so the
-        // sidebar isn't barren, but flag them as unfiltered.
-        try{window.__codexOrbitCurrentProject=null;}catch{}
-        if(rows.length<=8) return rows;
-        return rows.slice(0,8);
-      }
+      if(!curRoot&&!curLabel){ try{window.__codexOrbitCurrentProject=null;}catch{} return rows; } // truly unknown -> all (transient, self-heals once a chat opens)
       try{window.__codexOrbitCurrentProject=curLabel||lastSeg(curRoot)||null;}catch{}
       const f=rows.filter(inCurrent);
       if(f.length) return f;
@@ -227,7 +216,7 @@ SIDEBAR_IIFE = r"""
       const s=document.createElement("style"); s.id="codexOrbitStyleV4";
       s.textContent=`
 :root{--cox-open:${OPEN_WIDTH}px;--cox-rail:46px}
-.coxSidebar{position:fixed;top:0;right:0;bottom:0;width:var(--cox-open);z-index:2147483647;display:flex;flex-direction:column;background:var(--vscode-sideBar-background,#171717);color:var(--vscode-sideBar-foreground,var(--vscode-foreground,#d4d4d4));border-left:1px solid var(--vscode-sideBar-border,#2b2b2b);font-family:var(--vscode-font-family,system-ui,sans-serif);font-size:12px;transition:width .14s ease}
+.coxSidebar{position:fixed;top:0;right:0;bottom:0;width:var(--cox-open);z-index:50;display:flex;flex-direction:column;background:var(--vscode-sideBar-background,#171717);color:var(--vscode-sideBar-foreground,var(--vscode-foreground,#d4d4d4));border-left:1px solid var(--vscode-sideBar-border,#2b2b2b);font-family:var(--vscode-font-family,system-ui,sans-serif);font-size:12px;transition:width .14s ease}
 .coxSidebar *{box-sizing:border-box}
 .coxResize{position:absolute;left:-3px;top:0;bottom:0;width:6px;cursor:col-resize;z-index:1}
 .coxResize:hover{background:var(--vscode-focusBorder,#4d8dff)}
@@ -312,15 +301,7 @@ SIDEBAR_IIFE = r"""
     function navTo(path){ try{ const st=window.history.state; window.history.pushState(st&&typeof st==="object"?st:{},"",path); window.dispatchEvent(new PopStateEvent("popstate",{state:window.history.state})); return true; }catch{ return false; } }
     function appPost(type,payload){ try{ window.postMessage({...(payload||{}),type},window.location.origin||"*"); return true; }catch{ return false; } }
     function hostPost(type,payload){ try{ if(typeof window.__codexPostMessage==="function"){ window.__codexPostMessage(type,payload||{}); return true; } }catch{} return false; }
-    function routeTo(path){
-      // 1) Try host message (reliable — Codex's extension host handles routing).
-      let ok=false;
-      ok=hostPost("navigate-to-route",{path})||ok;
-      ok=appPost("navigate-to-route",{path})||ok;
-      ok=navTo(path)||ok;
-      setTimeout(()=>{ try{ if(location.pathname!==path) window.location.href=path; }catch{} },120);
-      return ok;
-    }
+    function routeTo(path){ appPost("navigate-to-route",{path}); hostPost("navigate-to-route",{path}); return navTo(path); }
     const titleKey=(s)=>clean(s).replace(/^⭐\s*/,"").replace(/^📌\s*/,"");
     function clickTarget(el){
       if(!el) return null;
@@ -358,92 +339,26 @@ SIDEBAR_IIFE = r"""
       setTimeout(()=>{ const now=location.pathname+location.search+location.hash; if(now===before) routeTo(path); },90);
       return true;
     }
-    // Find the native Codex sidebar row that matches this thread by title.
-    // Returns the DOM element or null.
-    function findNativeRow(t){
-      const want=titleKey(t.title);
-      const rows=document.querySelectorAll(A.row);
-      for(const el of rows){
-        const elTitle=titleKey(el.getAttribute(A.title)||el.textContent||"");
-        if(elTitle===want) return el;
-        // Fuzzy match: one contains the other
-        if(elTitle&&want&&(elTitle.includes(want)||want.includes(elTitle))) return el;
-      }
-      return null;
+    function nativeOpen(t){
+      try{
+        if(typeof window.__codexOrbitOpenThreadById==="function"){
+          if(window.__codexOrbitOpenThreadById(t.id)||window.__codexOrbitOpenThreadById(t.__id)) return true;
+        }
+      }catch{}
+      return false;
     }
     function openThread(t){
       const path=threadPath(t);
-      // 1) Click the native Codex sidebar row (the ONE reliable path).
-      //    Match by TITLE, not by ID — IDs differ between wire data and DOM.
-      const nativeRow=t.element||findNativeRow(t);
-      if(nativeRow&&clickThenRoute(nativeRow,path)) return;
-      // 2) Try the opener registered by Codex's own component.
-      try{
-        if(typeof window.__codexOrbitOpenThreadById==="function"){
-          if(window.__codexOrbitOpenThreadById(t.id)||window.__codexOrbitOpenThreadById(t.__id)) return;
-        }
-      }catch{}
-      // 3) Hard fallback: route by path. The host postMessage path has been
-      //    beefed up to try window.location.href as last resort.
+      // 0) Use the opener registered by Codex's real row component when present.
+      if(nativeOpen(t)) return;
+      // 1) Codex's OWN row click = its real navigate handler (the reliable path).
+      if(t.element&&clickThenRoute(t.element,path)) return;
+      try{ const row=document.querySelector(`[data-app-action-sidebar-thread-id="${(window.CSS&&CSS.escape)?CSS.escape(t.id):t.id}"]`); if(row&&clickThenRoute(row,path)) return; }catch{}
+      // 2) Bridge a wrong/stale id by matching a native row on title.
+      try{ const want=titleKey(t.title); for(const el of document.querySelectorAll(A.row)){ if(titleKey(el.getAttribute(A.title)||el.textContent)===want&&clickThenRoute(el,path)) return; } }catch{}
+      // 3) React Router (unstable_HistoryRouter): /local/<id> for local, /remote/<id> for a remote host.
       routeTo(path);
     }
-
-    // ---------- inline settings panel (never navigates away) ----------
-    let settingsVisible=false, searchWasHidden=false;
-    function hideSettingsPanel(){
-      settingsVisible=false;
-      const pane=shell&&shell.querySelector(".coxSettingsPane");
-      if(pane) pane.classList.remove("open");
-      if(shell){
-        const list=shell.querySelector(".coxList");
-        const searchW=shell.querySelector(".coxSearchWrap");
-        const newBtn=shell.querySelector(".coxNewBtn");
-        if(list) list.style.display="";
-        if(searchW&&searchWasHidden) searchW.classList.add("coxHidden");
-        else if(searchW) searchW.classList.remove("coxHidden");
-        if(newBtn) newBtn.style.display="";
-      }
-    }
-    function showSettingsPanel(){
-      if(!shell) return;
-      settingsVisible=true;
-      const list=shell.querySelector(".coxList");
-      const searchW=shell.querySelector(".coxSearchWrap");
-      const newBtn=shell.querySelector(".coxNewBtn");
-      if(list) list.style.display="none";
-      searchWasHidden=searchW?searchW.classList.contains("coxHidden"):true;
-      if(searchW) searchW.classList.add("coxHidden");
-      if(newBtn) newBtn.style.display="none";
-      const body=shell.querySelector(".coxSettingsBody");
-      if(!body) return;
-      const curProj=window.__codexOrbitCurrentProject||curLabel||lastSeg(curRoot)||"(detecting…)";
-      const threadCount=dataThreads.length;
-      const filteredCount=currentRows(mergeThreads(domThreads()),domThreads()).length;
-      body.innerHTML=`
-        <button class="coxBtn" id="coxSettingsBack" type="button" title="Back to chats">${IC.back} Back to chats</button>
-        <label>Current project</label>
-        <div class="coxSettingVal">${curProj.replace(/&/g,"&amp;").replace(/</g,"&lt;")}</div>
-        <label>Chats</label>
-        <div class="coxSettingVal">${threadCount} total · ${filteredCount} in this project</div>
-        <label>Sidebar</label>
-        <button class="coxBtn" id="coxClearCache" type="button">🗑 Clear local cache (pins, stars, collapsed state)</button>
-        <button class="coxBtn danger" id="coxDumpDebug" type="button">🪲 Download debug dump</button>
-        <div class="coxSettingsNote">Codex Orbit patcher v${"0.5.13"}</div>`;
-      body.querySelector("#coxSettingsBack").addEventListener("click",hideSettingsPanel);
-      body.querySelector("#coxClearCache").addEventListener("click",()=>{
-        try{ localStorage.removeItem(COLLAPSED_KEY); localStorage.removeItem(GROUP_KEY); localStorage.removeItem(WIDTH_KEY); localStorage.removeItem(PIN_KEY); localStorage.removeItem(STAR_KEY); localStorage.removeItem(CUR_KEY); }catch{}
-        collapsed=false; groupState=Object.create(null); pins=new Set(); stars=new Set(); curRoot=""; curLabel="";
-        syncChrome();
-        hideSettingsPanel();
-        render();
-      });
-      body.querySelector("#coxDumpDebug").addEventListener("click",()=>{
-        try{ window.codexOrbitDump&&window.codexOrbitDump(); }catch(e){ console.warn(e); }
-      });
-      const pane=shell.querySelector(".coxSettingsPane");
-      if(pane) pane.classList.add("open");
-    }
-    */
     // ---------- right-click context menu (our sidebar, our menu) ----------
     function closeMenu(){ document.querySelectorAll(".coxMenu").forEach((e)=>e.remove()); }
     function showMenu(x,y,t){
@@ -507,7 +422,7 @@ SIDEBAR_IIFE = r"""
       const nativeEls=[...document.querySelectorAll(A.row)];
       const data={
         at:new Date().toISOString(),
-        version:"0.5.13",
+        version:"0.5.12",
         location:{href:location.href,pathname:location.pathname,hash:location.hash,search:location.search},
         activeRoots:activeRoots,
         currentProject:(window.__codexOrbitCurrentProject||null),
@@ -641,11 +556,9 @@ def copy_patched_assets(extension_dir, patcher_version):
 def expose_native_openers(wv):
     """Expose Codex's real row navigation closures so Orbit can route without
     guessing URL shapes that drift between Codex builds."""
-    local_old_anchor = "let St=Re??void 0,Ct;"
-    local_new_anchor = "let At=Je??void 0,jt;"
-    remote_old_anchor = "}else P=t[4],ge=t[5],F=t[6];let I="
-    remote_new_anchor = "}else F=t[4],R=t[5],z=t[6];let xe="
-    local_old_bridge = (
+    local_anchor = "let St=Re??void 0,Ct;"
+    remote_anchor = "}else P=t[4],ge=t[5],F=t[6];let I="
+    local_bridge = (
         "try{"
         "(window.__codexOrbitLocalOpeners||(window.__codexOrbitLocalOpeners=new Map())).set(String(n),()=>je(n,r));"
         "window.__codexOrbitOpenThreadById=function(id){"
@@ -654,16 +567,7 @@ def expose_native_openers(wv):
         "return false};"
         "}catch{}"
     )
-    local_new_bridge = (
-        "try{"
-        "(window.__codexOrbitLocalOpeners||(window.__codexOrbitLocalOpeners=new Map())).set(String(n),()=>{g?.();Ve(n,i)});"
-        "window.__codexOrbitOpenThreadById=function(id){"
-        "try{let f=window.__codexOrbitLocalOpeners&&window.__codexOrbitLocalOpeners.get(String(id));if(f){f();return true}}catch{}"
-        "try{let f=window.__codexOrbitRemoteOpeners&&window.__codexOrbitRemoteOpeners.get(String(id));if(f){f();return true}}catch{}"
-        "return false};"
-        "}catch{}"
-    )
-    remote_old_bridge = (
+    remote_bridge = (
         "}else P=t[4],ge=t[5],F=t[6];"
         "try{"
         "(window.__codexOrbitRemoteOpeners||(window.__codexOrbitRemoteOpeners=new Map())).set(String(P),ge);"
@@ -673,31 +577,15 @@ def expose_native_openers(wv):
         "return false};"
         "}catch{}let I="
     )
-    remote_new_bridge = (
-        "}else F=t[4],R=t[5],z=t[6];"
-        "try{"
-        "(window.__codexOrbitRemoteOpeners||(window.__codexOrbitRemoteOpeners=new Map())).set(String(F),R);"
-        "window.__codexOrbitOpenThreadById=window.__codexOrbitOpenThreadById||function(id){"
-        "try{let f=window.__codexOrbitLocalOpeners&&window.__codexOrbitLocalOpeners.get(String(id));if(f){f();return true}}catch{}"
-        "try{let f=window.__codexOrbitRemoteOpeners&&window.__codexOrbitRemoteOpeners.get(String(id));if(f){f();return true}}catch{}"
-        "return false};"
-        "}catch{}let xe="
-    )
     patched = []
     for f in wv.glob("*.js"):
         text = f.read_text(encoding="utf-8", errors="ignore")
         changed = False
-        if local_old_anchor in text and "(window.__codexOrbitLocalOpeners||" not in text:
-            text = text.replace(local_old_anchor, local_old_bridge + local_old_anchor, 1)
+        if local_anchor in text and "__codexOrbitLocalOpeners" not in text:
+            text = text.replace(local_anchor, local_bridge + local_anchor, 1)
             changed = True
-        if local_new_anchor in text and "(window.__codexOrbitLocalOpeners||" not in text:
-            text = text.replace(local_new_anchor, local_new_bridge + local_new_anchor, 1)
-            changed = True
-        if remote_old_anchor in text and "(window.__codexOrbitRemoteOpeners||" not in text:
-            text = text.replace(remote_old_anchor, remote_old_bridge, 1)
-            changed = True
-        if remote_new_anchor in text and "(window.__codexOrbitRemoteOpeners||" not in text:
-            text = text.replace(remote_new_anchor, remote_new_bridge, 1)
+        if remote_anchor in text and "__codexOrbitRemoteOpeners" not in text:
+            text = text.replace(remote_anchor, remote_bridge, 1)
             changed = True
         if changed:
             f.write_text(text, encoding="utf-8", newline="")
