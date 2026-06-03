@@ -487,3 +487,19 @@ hook confirmed in the built VSIX). Bumped `0.5.24 → 0.5.25`, archived as build
 
 **Verdict:** live; all syntax checks pass; menu/dot changes confirmed in the built VSIX.
 Bumped `0.5.25 → 0.5.26`, archived as build #41.
+
+## Newest-first sort + UUID-robust live status (v0.5.27)
+
+**Files:** `stable/patch_codex.py`
+
+Two fixes from watching a new chat appear:
+- **Newest on top.** `render()` now `rows.sort((a,b)=>(b.ts||0)-(a.ts||0))` before grouping, so
+  a new/just-active chat sorts above older ones (every section sorted, not insertion order).
+- **Spinner on new/thinking chats — UUID match.** The status hook's conversationId and the
+  wire row id can carry different prefixes (`z()`-normalized), so an exact-string match missed.
+  Both sides are Codex UUIDs, so `liveStatus` is now keyed by the embedded UUID (`uuidOf`) and
+  `statusOf` looks up by the row's UUID — bridging the two id forms so a thinking chat shows
+  the spinner once it lands in the list. (The ~10s list-appearance lag is Codex's own
+  push cadence — accepted; the dump's `liveStatus` confirms the hook fires meanwhile.)
+
+**Verdict:** live; all syntax checks pass. Bumped `0.5.26 → 0.5.27`, archived as build #42.
