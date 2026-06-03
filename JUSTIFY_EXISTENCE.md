@@ -434,3 +434,37 @@ plumbing are in place; the event-stream listener is being wired from a fresh RE 
 then locals show the relative time and the spinner/orange only light up for status we can
 already read (remote tasks). **Verdict:** live; strict-module parse passes. Bumped
 `0.5.23 → 0.5.24`, archived as build #39.
+
+## Live per-chat status — the real wiring (v0.5.25)
+
+**Files:** `stable/patch_codex.py`
+
+Closes v0.5.24's known gap. A dedicated RE pass established the load-bearing fact: **Codex's
+live status never reaches `window`** — `turn/started`, `turn/completed`,
+`thread/status/changed`, `item/*requestApproval*`, `item/tool/requestUserInput` arrive over
+the app-server IPC bridge (`vscode://codex/ipc-request` + `H.subscribe`), land in
+`onNotification`, and mutate Jotai atoms the React rows read directly. The one
+window-observable signal (`ipc-broadcast` → `thread-stream-state-changed`) is multi-window
+follower-sync only and rarely fires in a single VS Code window — so a window listener alone
+is a dead feature.
+
+- **The reliable hook:** every status/turn/approval notification funnels its new conversation
+  state through the SEMANTIC method `updateConversationState(id, updater)` (verified in the
+  shipped 5519 chunk `app-server-manager-signals-DRv4QdiA.js`). `expose_status_stream`
+  appends one call — `try{window.__codexOrbitStatusHook&&__codexOrbitStatusHook(e,r)}catch{}`
+  — AFTER `applyConversationState(e,r)` runs. The sidebar's `deriveStatus(state)` reproduces
+  Codex's own row logic (systemError/turn-failed→failed; active+waitingOnApproval/UserInput
+  or a pending request→waiting; active/turn-inProgress→running; else idle) into a `liveStatus`
+  map that `statusOf()` consults first.
+- **Why this point, not a window listener / not the broadcast:** it is the single choke point
+  ALL status lands on; it is a stable semantic name (survives churn better than minified
+  locals); and it is the only place reachable without reading Jotai atoms.
+- **Safety:** the injection is anchored on the EXACT 5519 method body and only APPENDS a
+  try/catch'd side-effect — the original behaviour is unchanged. If the anchor ever drifts it
+  simply doesn't apply (status falls back to best-effort), it can never break Codex. `verify()`
+  now also strict-module-parses the patched status chunk (a broken one would break Codex's
+  conversation engine) and confirms the hook landed. `codexOrbitDump()` reports `statusHook`
+  + the live `liveStatus` entries so an id-format mismatch (hook id vs wire id) is visible.
+
+**Verdict:** live; all four checks pass (helper + host bundle + status chunk strict parse,
+hook confirmed in the built VSIX). Bumped `0.5.24 → 0.5.25`, archived as build #40.
