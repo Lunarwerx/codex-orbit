@@ -334,3 +334,50 @@ section headers are untouched — those still carry meaning. **Why vs. rejected:
 special-casing "hide if header == title" is narrower and breaks the moment the workspace
 folder name differs from the product name; "one group ⇒ no group label" is the general
 truth and needs no name comparison. **Verdict:** live. Bumped `0.5.20 → 0.5.21`.
+
+## Sidebar feature parity: settings menu, filter, per-row actions, status dots (v0.5.22)
+
+**Files:** `stable/patch_codex.py`, `FEATURES.md`
+
+Mirror Codex's native sidebar in OUR UI. Reverse-engineering Codex's bundle (3 agents)
+produced three load-bearing truths that shaped the design — captured in `FEATURES.md`:
+- **Codex has no native "star"** (`star-*.js` is just an icon) → ours, local.
+- **Codex's per-chat color is DORMANT** — `sidebar-thread-metadata[id].labelColor` exists
+  but there is no palette, no setter, and the row never renders it → ours, end to end.
+- **Local chat status is NOT on the intercepted wire list** (it lives in live Jotai atoms;
+  we see `{type:"notLoaded"}`). Only REMOTE tasks carry status inline → status dots are
+  authoritative for remote, best-effort (usually gray) for local. Documented gap.
+
+What shipped, and the primitive each reuses:
+- **Host channel** (`expose_host_channel`): `acquireVsCodeApi()` may be called once and
+  Codex already calls it, so we WRAP its call site to tee the instance into
+  `window.__codexOrbitVsApi`. `coxPost(type,payload)` then posts the SAME messages Codex's
+  own code posts — no second acquire (which throws). This is the one primitive that makes
+  "call their function" possible (archive, run-command).
+- **Settings menu** (gear button): our UI, Codex's `run-command` dispatch. Exact 7-item
+  flyout is from a Codex newer than our baseline, so a few command ids are best-known; a
+  miss is a harmless no-op and `codexOrbitDump().hostChannel` reports whether the channel
+  is live, so ids are tunable in the fix-and-push loop. **Why vs. rejected:** clicking the
+  native gear menu has no stable selector (the cog carries no aria/data-attr); `run-command`
+  is the stable contract.
+- **Filter menu**: implemented over data we already hold (no native dep). Pinned/Starred
+  (ours), Untitled (`!title.trim()`), Age (`now-(updatedAt??createdAt)`), Running/Waiting
+  (derived status). Persisted (`codexOrbitFilterV4`).
+- **Per-chat color**: palette popup (clear + 6 colors we define), persisted
+  (`codexOrbitColorsV4`), rendered as an inset left-border on our row. We own it because
+  Codex ships nothing to call.
+- **Hover toolbar** (star/pin/color/archive on `.coxRow` hover): the row became a
+  `div[role=button]` so action `<button>`s can nest legally; routed by the existing
+  delegated `.coxList` handler (`[data-cox-act]` checked before row-open).
+- **Archive**: Codex's real `archive-conversation` command via the host channel (+ both
+  envelope shapes), plus an optimistic local hide (`codexOrbitArchivedV4`) so OUR list
+  updates instantly. **Open risk:** if the bare-postMessage envelope is wrong, the chat is
+  hidden from our list but not actually archived — tunable once confirmed against the live
+  host.
+- **Status dots**: `statusOf` → DOT color (running=blue, waiting=orange, failed=red,
+  review=green, idle=gray), matching Codex's tone mapping.
+
+**Verdict:** live; applies clean (strict-module parse + host bundle check pass, all 15
+feature markers present in the built VSIX). Runtime confidence varies by feature (see
+FEATURES.md) — the user verifies by install per the fix-and-push loop. Bumped
+`0.5.21 → 0.5.22`, archived as build #36.
