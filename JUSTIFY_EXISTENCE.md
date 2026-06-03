@@ -381,3 +381,31 @@ What shipped, and the primitive each reuses:
 feature markers present in the built VSIX). Runtime confidence varies by feature (see
 FEATURES.md) — the user verifies by install per the fix-and-push loop. Bumped
 `0.5.21 → 0.5.22`, archived as build #36.
+
+## Sidebar parity polish — from install feedback (v0.5.23)
+
+**Files:** `stable/patch_codex.py`
+
+Five corrections after using v0.5.22:
+- **Left gap.** The persistent `coxMark` (📌/⭐) span sat 12px wide even when empty,
+  indenting every title. Removed — pin/star are conveyed by the Pinned/Starred section
+  headers and the lit hover buttons, so the inline mark was redundant. Row is now
+  `dot · title · actions`.
+- **Floating action container.** The hover toolbar was `position:absolute` with its own
+  background + shadow — read as a separate widget. Made it an inline flex member of the
+  row (`margin-left:auto`, no bg/shadow); on hover the title truncates to make room, the
+  native VS Code pattern. **Justify:** we own the row, so the actions should BE the row.
+- **Dead settings toggles.** YOLO mode + Chat preview header were placeholders with guessed
+  ids and no readable state — dead buttons. **Subtracted** (justify-or-die): better absent
+  than lying. Settings now lists only the 5 items wired to a real `run-command` id.
+- **Color barely visible.** Was a 3px left bar only. Now tints the WHOLE row (left bar +
+  a faint full-row fill via an inset box-shadow overlay that survives `:hover`), so it
+  clearly reads as "this container is colored." The status dot stays separate (by design).
+- **Archived section.** Archived chats no longer vanish — they drop into their own
+  collapsible **"Archived"** group at the bottom (mirrors Codex's native layout), and the
+  archive action toggles (archive ⇄ unarchive, optimistic + best-effort `*-conversation`
+  command). **Untitled-chats filter removed** — Codex auto-titles every chat, so it had
+  no job.
+
+**Verdict:** live; strict-module parse + host bundle check pass; all changes confirmed in
+the built VSIX. Bumped `0.5.22 → 0.5.23`, archived as build #37.

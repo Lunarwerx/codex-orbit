@@ -16,24 +16,30 @@ global (`window.__codexOrbitPost`) by patching the setting-storage chunk where
 `acquireVsCodeApi()` is assigned. Confirmed pattern: `dispatchMessage(type,payload){ lr.postMessage({...payload,type}) }`.
 
 ## 1. Settings menu (gear button, next to Search)
-Codex's 7 items: YOLO mode (toggle), Chat preview header (toggle), Account & usage,
-Switch model, Switch account, Custom instructions, Color theme.
-- Webview runs menu actions via `run-command` dispatch: `__codexOrbitPost("run-command",{id})`.
-- **Caveat (honest):** the exact 7-item flyout is from a NEWER Codex than our bundled
-  baseline; the precise command ids aren't in our build. We render the menu (our UI) and
-  post best-known ids (`settings`, `personalitySettings`, `composer.openModelPicker`,
-  `logOut`, theme), with a fallback that opens Codex's own native gear menu. Ids are
-  tunable against the running build via diagnostics. **Status: scaffold + best-effort.**
+Codex's gear items. We render only the ones wired to a REAL `run-command` id (via the host
+channel `coxPost("run-command",{id})`): Account & usage, Switch model, Switch account,
+Custom instructions, Color theme.
+- **YOLO mode + Chat preview header REMOVED (v0.5.23):** their command ids/state are not in
+  our bundled baseline, so they were dead placeholder buttons — subtracted (better absent
+  than lying). Re-add once we capture the running build's exact ids.
+- **Caveat (honest):** the flyout is from a NEWER Codex than our baseline, so a few of the
+  5 ids are best-known/derived; a miss is a harmless no-op. `codexOrbitDump().hostChannel`
+  reports whether the channel is live so ids are tunable. **Status: 5 real items, best-effort.**
 
 ## 2. Filter menu (filter button)
-TYPE: Pinned, Starred, Running, Waiting · AGE: 1h/24h/7d/30d · HIDE: Untitled chats.
-Implemented in OUR render() over data we already hold — no native dependency:
+TYPE: Pinned, Starred, Running, Waiting · AGE: 1h/24h/7d/30d. (Untitled filter dropped in
+v0.5.23 — Codex auto-titles every chat, so it had no job.) Implemented in OUR render()
+over data we already hold — no native dependency:
 - Pinned = our pin set. Starred = our star set.
 - Running = derived status `running`; Waiting = derived status `waiting` (see #5; reliable
   for remote tasks which carry status inline, best-effort for local).
 - Age = `now - (updatedAt ?? createdAt)` ≤ bucket (remote ts is seconds → ×1000).
-- Untitled = `!(title.trim())` (Codex shows these as "New chat"/"Untitled chat").
 **Status: fully ours, shippable.**
+
+## 2b. Archived section (v0.5.23)
+Archived chats drop into a collapsible "Archived" group at the bottom (Codex's native
+layout), not removed. Archive action toggles (archive ⇄ unarchive). `codexOrbitArchivedV4`
+holds our local set; `archive-conversation` / `unarchive-conversation` posted best-effort.
 
 ## 3. Per-chat color (the swatch palette)
 **Truth: Codex's color feature is DORMANT** — the storage field `sidebar-thread-metadata[id].labelColor`
