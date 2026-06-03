@@ -409,3 +409,28 @@ Five corrections after using v0.5.22:
 
 **Verdict:** live; strict-module parse + host bundle check pass; all changes confirmed in
 the built VSIX. Bumped `0.5.22 → 0.5.23`, archived as build #37.
+
+## Row subtitles + counted collapsible sections + status-dot rendering (v0.5.24)
+
+**Files:** `stable/patch_codex.py`
+
+Match Codex's native row + section chrome:
+- **Second line under each title:** `relTime(ts)` ("12 min ago" / "19 hrs ago" / "2 days
+  ago") when idle, or live status text ("Thinking…" / "Question" / "Failed") when active.
+  Row is now two lines (`coxRowMain` stacks title + subtitle). A 30s `setInterval`
+  re-render keeps the relative times fresh.
+- **Left indicator by state:** an animated CSS **spinner** while running, else a colored
+  dot (blue/orange/red/gray). `statusOf` now consults a `liveStatus` Map first (populated
+  by the event-stream listener — wired next), then falls back to wire/remote status.
+- **Counted, collapsible sections:** every group header (`⭐ Starred`, `📌 Pinned`,
+  `Sessions`, `Archived`) gets a chevron + a right-aligned count badge and collapses on
+  click (persisted in `groupState`). The single-workspace main list is now a **"Sessions"**
+  group (not flat) with its count — matching Codex; per-project headers remain only for the
+  multi-workspace blind-fallback. Order: Starred, Pinned, Sessions, Archived.
+
+**Known gap (next push):** live local "Thinking…/Question" needs Codex's per-thread status
+EVENTS (not the chat list, which carries `status:notLoaded`). The rendering + `liveStatus`
+plumbing are in place; the event-stream listener is being wired from a fresh RE pass — until
+then locals show the relative time and the spinner/orange only light up for status we can
+already read (remote tasks). **Verdict:** live; strict-module parse passes. Bumped
+`0.5.23 → 0.5.24`, archived as build #39.
