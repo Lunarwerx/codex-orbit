@@ -503,3 +503,27 @@ Two fixes from watching a new chat appear:
   push cadence — accepted; the dump's `liveStatus` confirms the hook fires meanwhile.)
 
 **Verdict:** live; all syntax checks pass. Bumped `0.5.26 → 0.5.27`, archived as build #42.
+
+## Crash fix (webview suicide) + selected-chat indicator + darker dot (v0.5.28)
+
+**Files:** `stable/patch_codex.py`
+
+- **CRASH: opening a non-current chat blanked the whole webview.** `routeTo`'s last-resort
+  `setTimeout(()=>{ if(location.pathname!==path) window.location.href=path },120)` set the
+  webview's `location.href` to a relative app path (`/local/<id>`) whenever Codex's resulting
+  URL didn't byte-match our constructed one within 120ms — which is the norm for any chat
+  that isn't already open (Codex normalizes the route). In a vscode-webview that loads a
+  non-existent resource and **blanks the entire webview** ("committed seppuku"). The current
+  chat never tripped it (its URL already matches). **Removed** the href fallback entirely —
+  host-message + app-postMessage + `history.pushState`+popstate already navigate; worst case
+  now is a no-switch, never a crash. **Justify-or-die:** a fallback that destroys the app is
+  worse than no fallback.
+- **Selected-chat indicator.** The open chat (by URL id, UUID-matched) now gets the `.act`
+  highlight plus a left accent bar (`.coxRow.act::before`), re-applied on `popstate` so it
+  tracks as you switch chats. Previously selection only showed if the wire data happened to
+  flag the row active — usually it didn't.
+- **Darker idle dot.** `#6e6e6e → #565656` (the nicer, darker gray, closer to Codex).
+- **Defensive:** `ensureShell` re-appends the panel if Codex ever detaches it from `body`.
+
+**Verdict:** live; all syntax checks pass; six change-markers confirmed in the built VSIX.
+Bumped `0.5.27 → 0.5.28`, archived as build #43.
