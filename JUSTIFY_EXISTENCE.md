@@ -315,3 +315,22 @@ road existed too: even with home known, an empty `inCurrent` match fell *through
   identifier drift no-ops gracefully (host still parses, webview falls back).
 
 **Verdict:** live. Bumped `0.5.19 → 0.5.20`, archived as build #34.
+
+**Confirmed live on install (diagnostics):** `hostWorkspace` stamp present, `activeRoots:[]`
+and `nativeRowCount:0` (both legacy signals blank), `threadCount:1628` intercepted →
+`filteredCount:1`. The host `<meta>` does 100% of the filtering; the webview heuristics
+never fire on the home view, exactly as designed.
+
+## Drop the redundant project header when filtered to one workspace (v0.5.21)
+
+**Files:** `stable/patch_codex.py`
+
+Once v0.5.20 filters the list to the current workspace, the only project group is that
+workspace — so its header (`CODEX ORBIT`) just repeats the sidebar's own title
+(`Codex Orbit`) directly above it. `render()` now lists the non-pinned/non-starred chats
+**flat** when `order.length<=1`, and keeps per-project headers only when >1 project is
+present (the blind-fallback case, where the label actually disambiguates). Pinned/Starred
+section headers are untouched — those still carry meaning. **Why vs. rejected:**
+special-casing "hide if header == title" is narrower and breaks the moment the workspace
+folder name differs from the product name; "one group ⇒ no group label" is the general
+truth and needs no name comparison. **Verdict:** live. Bumped `0.5.20 → 0.5.21`.
