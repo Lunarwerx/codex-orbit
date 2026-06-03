@@ -185,9 +185,16 @@
     },
     {
       "version": "0.5.23",
-      "build": 37,
+      "build": 38,
       "codex": "26.5519.32039",
       "file": "patch_codex-0.5.23.py",
+      "date": "2026-06-03"
+    },
+    {
+      "version": "0.5.24",
+      "build": 39,
+      "codex": "26.5519.32039",
+      "file": "patch_codex-0.5.24.py",
       "date": "2026-06-03"
     }
   ]
