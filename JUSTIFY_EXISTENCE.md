@@ -527,3 +527,28 @@ Two fixes from watching a new chat appear:
 
 **Verdict:** live; all syntax checks pass; six change-markers confirmed in the built VSIX.
 Bumped `0.5.27 → 0.5.28`, archived as build #43.
+
+## Render storm killed — fixes ~20s status lag + frozen spinner (v0.5.29)
+
+**Files:** `stable/patch_codex.py`
+
+Both symptoms (status appearing ~20s late, and the "spinner" showing as a static ring) traced
+to ONE cause: the `MutationObserver` reacted to ANY DOM mutation outside our shell. When a chat
+streams tokens, Codex mutates the transcript ~12x/s, so the observer fired a full list rebuild
+~12x/s. That (a) **saturated the event loop** — the status hook set `liveStatus` instantly but
+the actual DOM render queued ~20s behind — and (b) **destroyed+recreated the spinner element
+every frame**, restarting its CSS animation so it never visibly rotated.
+
+- **Gate the observer to native sidebar rows only.** It now re-renders only when an
+  `[data-app-action-sidebar-thread-row]`/`-project-row` is added/removed — never on transcript
+  streaming (text deltas are text nodes, `nodeType!==1`, skipped cheaply). Status/list/nav
+  already update via their own signals (status hook, message ingest, popstate/focus); the 30s
+  interval refreshes relative times. No storm ⇒ the hook's render lands in ~80ms (not 20s) and
+  the spinner element persists between status changes, so it animates.
+- **Spinner contrast:** faint ring (`rgba(255,255,255,.16)`) + a bright blue rotating arc, 10px,
+  so the rotation reads clearly.
+- This is the v0.5.16 storm fix completed: that round stopped the observer self-triggering on
+  OUR writes; this round stops it triggering on Codex's transcript writes.
+
+**Verdict:** live; all syntax checks pass. Bumped BOTH `patcher_version.txt` files (per
+[[dual-patcher-version-files]]). `0.5.28 → 0.5.29`, archived as build #44.
