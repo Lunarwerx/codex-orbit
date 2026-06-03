@@ -468,3 +468,22 @@ is a dead feature.
 
 **Verdict:** live; all four checks pass (helper + host bundle + status chunk strict parse,
 hook confirmed in the built VSIX). Bumped `0.5.24 → 0.5.25`, archived as build #40.
+
+## Row/menu polish from feedback (v0.5.26)
+
+**Files:** `stable/patch_codex.py`
+
+- **Dot top-aligned + neutral gray.** The idle dot used `var(--vscode-descriptionForeground)`,
+  which is WARM in the user's theme — it read orange on the selected row (the tell: the
+  subtitle said "49 min ago" = idle, yet the dot looked orange). Fixed to `#6e6e6e` (theme-
+  independent gray) and `align-self:flex-start;margin-top:5px` so it sits on the title line,
+  not centered against the two-line block. Spinner likewise.
+- **Right-click menu = Codex's.** Now just **Pin · Star · Archive**, then an inline color
+  swatch row (clear + 6) — set color in one click, no submenu. **Removed** Open (clicking the
+  row already opens), the separate "Set color…" item, and "Filter to this chat". **Subtract:**
+  each removed option had no unique job the row/headers don't already serve.
+- **Copy diagnostics → gear menu.** Kept (it's the debugging lifeline for the status-id check)
+  but moved out of the row menu into Settings, so the row menu stays clean.
+
+**Verdict:** live; all syntax checks pass; menu/dot changes confirmed in the built VSIX.
+Bumped `0.5.25 → 0.5.26`, archived as build #41.
