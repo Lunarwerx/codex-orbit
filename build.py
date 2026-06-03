@@ -32,6 +32,12 @@ WRAPPER_VERSION_SRC = ROOT / "wrapper_version.txt"
 BUILD_LOG = BUILDS_DIR / "BUILD_LOG.md"
 EXT_NAME = "codex-orbit"
 
+# Two icons on purpose: <Icon> is what VS Code shows in-editor (transparent
+# white mark, looks right on the dark Extensions UI and our webview/activity
+# bar, which all reuse media/codex-orbit.png). Services.Icons.Default is the
+# Marketplace web listing, which renders on white where a transparent mark
+# vanishes -> it points at media/codex-orbit-store.png (same mark, solid black
+# background). Store gets the black box; the app never sees it.
 VSIX_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
@@ -48,7 +54,7 @@ VSIX_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
   <Dependencies />
   <Assets>
     <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" />
-    <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/media/codex-orbit.png" Addressable="true" />
+    <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/media/codex-orbit-store.png" Addressable="true" />
     <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true" />
   </Assets>
 </PackageManifest>
@@ -71,6 +77,7 @@ INCLUDED_PATHS = [
     Path("package.json"),
     Path("extension.js"),
     Path("media/codex-orbit.png"),
+    Path("media/codex-orbit-store.png"),
     Path("media/rec-saydeploy.png"),
     Path("media/rec-claude-code-orbit.png"),
     Path("media/rec-copilot-suite.png"),
