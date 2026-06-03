@@ -267,3 +267,51 @@ stayed empty, and `currentRows` punted to "show all".
 discriminator we reliably have is the project label; the missing piece was just "which
 label is current", which the URL hands us directly. **Verdict:** live. Bumped
 `0.5.18 → 0.5.19`, archived as build #33.
+
+## Workspace Filtering — host stamps the workspace (the single source of truth) (v0.5.20)
+
+**Files:** `stable/patch_codex.py`
+
+0.5.16–0.5.19 each added another *webview-side* heuristic to guess "which workspace is
+home" (URL parse, RPC sniff, active-flag, native-DOM scrape, persisted guess) — five
+workarounds for one fact — and the holes all line up on the **task-list / home view**:
+it is React Router's index route, so there is no `/local/<id>` in the URL (signal #1
+blank), `active-workspace-roots-updated` is a payload-less ping whose roots arrive on a
+separate React-Query RPC the window listener races (signal #2 blank), nothing is
+flagged current (#3), and no native sidebar rows exist (#4). With every signal dark and
+`CUR_KEY` empty, `currentRows()` fell to its last line `return rows.length<=8?rows:…` —
+and with exactly 8 tasks the "don't be barren" cap returned **every project**. A second
+road existed too: even with home known, an empty `inCurrent` match fell *through* the
+`if(f.length) return f` guard into that same show-all cap.
+
+- **Subtract the guessing; add one truth.** The extension HOST knows the workspace for
+  certain — `Oe.workspace.workspaceFolders` (== `zF()`, the same source Codex's own
+  `"active-workspace-roots":async()=>({roots:zF()})` handler uses). `inject_workspace_meta`
+  stamps it into the webview HTML as `<meta name="codex-orbit-workspace"
+  content='{"r":path,"l":name}'>` from `webviewMetaTags()` — which BOTH the production
+  and development HTML generators call, so the tag is present on **every** view before
+  any chat opens, with no RPC race and no DOM dependency. The sidebar's `hostWorkspace()`
+  reads it as signal **#0**; the five heuristics demote to a fallback for a host bundle
+  we failed to patch (kept, not deleted, because they are the graceful-degradation path
+  if a future Codex renames the anchor — justified, not debt).
+- **Close the leak.** When home is known, `currentRows` now returns `rows.filter(inCurrent)`
+  **even if empty** — knowing home means never showing not-home. The `if(f.length)`
+  fall-through that turned an empty match into "show all projects" is gone.
+- **Why vs. rejected (host surgery):** the patcher's stated ethos is "no host surgery so
+  it doesn't drift" — but it already string-patches minified webview locals
+  (`expose_native_openers`), and a sixth webview heuristic would still be blind on the
+  home view. Host injection is the user's own "one source of truth, rebuild correctly"
+  directive made literal. **CSP-safe:** the webview CSP is `script-src ${cspSource}` with
+  no inline/nonce, so an injected `<script>` is blocked — a `<meta>` is the only legal
+  channel; the sidebar reads it via `getAttribute`. Round-trip (JSON → `pl()`
+  HTML-escape → `getAttribute` decode → `JSON.parse`) verified for Windows backslash
+  paths, quotes, `&`, `<`, and empty.
+- **Sharpened the blade:** `verify()` now also `node --check`s the **host** bundle (a
+  broken host bundle bricks all of Codex, not just the sidebar) and logs whether the
+  `codex-orbit-workspace` stamp actually landed — a missed anchor is visible in the
+  build log instead of silently shipping the old "shows all" behaviour. The anchor is
+  the **semantic method name** `webviewMetaTags` (not a minified local), so it survives
+  Codex churn better than the opener anchors; `Oe`/`pl` are wrapped in try/catch so an
+  identifier drift no-ops gracefully (host still parses, webview falls back).
+
+**Verdict:** live. Bumped `0.5.19 → 0.5.20`, archived as build #34.
