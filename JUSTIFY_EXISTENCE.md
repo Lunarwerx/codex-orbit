@@ -541,6 +541,31 @@ Two fixes from watching a new chat appear:
 
 **Verdict:** live; all syntax checks pass. Bumped `0.5.26 → 0.5.27`, archived as build #42.
 
+## Model picker unclickable — our z-index covered Codex's popover (v0.5.33)
+
+**Files:** `stable/patch_codex.py`
+
+**Symptom:** in patched Codex, clicking the model dropdown / "change model" did nothing,
+but the `/model` slash command worked. **Root cause (RE-confirmed against Codex's bundle):**
+Codex's model picker is a **Radix dropdown portaled to `document.body`, `position:fixed`,
+`z-index:50`**. Our sidebar is ALSO a `<body>` child but at **`z-index:2147483647`** (the
+32-bit max), so — as DOM siblings under body, stacking decided purely by z-index — our panel
+painted over the entire picker layer and ate the pointer. `/model` works because it's a JS
+command that never touches that DOM layer (which is the tell: keyboard works, click doesn't).
+
+- **Fix:** stop using the absurd max z-index. `.coxSidebar` (open + collapsed) → `45`,
+  `.coxMenu` → `49`. Now: Codex content (~0) < our sidebar (45) < our menus (49) < Codex's
+  popover layer (50). The picker renders ON TOP of our panel and is clickable; our menus
+  still sit above our panel; Codex modals/toasts (≥50) correctly sit above us. `body{padding-
+  right}` is unchanged — it reserves layout space and (correctly) does not move the fixed
+  popover. **Justify-or-die:** `2147483647` was "be on top of everything," which is wrong —
+  a sidebar must be above CONTENT but below the host's transient popovers.
+- **Version-independent:** the fix is in our injected CSS, so it applies to whatever Codex
+  build is patched (the bug reproduced on the newest Codex too).
+
+**Verdict:** live; patch applies clean, max z-index gone, picker layer (50) now above ours.
+Bumped `0.5.32 → 0.5.33` (both version files), archived as build #50.
+
 ## Crash fix (webview suicide) + selected-chat indicator + darker dot (v0.5.28)
 
 **Files:** `stable/patch_codex.py`
