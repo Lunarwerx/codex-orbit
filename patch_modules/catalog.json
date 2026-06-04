@@ -1,0 +1,49 @@
+{
+  "_doc": {
+    "what": "Codex Orbit's patch MODULE registry. Each module is one cohesive feature of the patcher (stable/patch_codex.py), declared as data. The userFacing+toggleable ones surface as checkboxes in the wrapper's PATCHES section and pass --disable <id> to the patcher.",
+    "how": "Codex Orbit's patcher is a single appended IIFE (the sidebar) plus a few host/webview-chunk injections (workspace meta, status hook, host channel, native row openers). The sidebar IIFE is monolithic, so its sub-features are 'required' (baked in) today; the separately-injected host pieces are independently gateable. id MUST equal the patcher's GATEABLE_FEATURES string for the toggleable ones.",
+    "tiers": {
+      "core":    "Always applied. The sidebar IIFE + the scaffolding every feature needs.",
+      "host":    "Separate injections into Codex's host bundle / webview chunks (workspace meta, status hook, host channel, native openers).",
+      "sidebar": "Sub-features rendered inside the monolithic sidebar IIFE (sessions, sort, status, color, archive, filter, settings). Required today; split out as the IIFE is decomposed."
+    },
+    "fields": {
+      "required":   "true = always applied, cannot be disabled.",
+      "userFacing": "true = surfaced as a wrapper PATCHES toggle.",
+      "gates":      "the patcher function/call this module controls (traceability).",
+      "verify":     "marker string proving it applied (logged by the patcher / present in the built VSIX).",
+      "status":     "ok | watch | broken."
+    }
+  },
+
+  "target": "openai.chatgpt",
+  "schemaVersion": 1,
+
+  "modules": [
+    { "id": "sidebar",          "title": "Codex Orbit sidebar",     "tier": "core", "required": true,  "userFacing": false, "gates": "copy_patched_assets (SIDEBAR_IIFE)", "verify": ["__codexOrbitSidebarV4"], "status": "ok",
+      "summary": "The appended self-contained sidebar IIFE: our panel, Codex's chats by project, search, New Task, collapse, resize. The root every other feature lives in." },
+
+    { "id": "native-openers",   "title": "Native row openers",      "tier": "host", "required": true,  "userFacing": false, "gates": "expose_native_openers", "verify": ["__codexOrbitOpenThreadById"], "status": "ok",
+      "summary": "Exposes Codex's real local/remote row-open closures so clicking an Orbit row routes via Codex's own navigation (no guessed URLs)." },
+
+    { "id": "host-channel",     "title": "Host action channel",     "tier": "host", "required": true,  "userFacing": false, "gates": "expose_host_channel", "verify": ["__codexOrbitVsApi"], "status": "ok",
+      "summary": "Tees Codex's single acquireVsCodeApi() into a global so Orbit can post the SAME host messages Codex does (archive, run-command for the settings menu)." },
+
+    { "id": "workspace-filter", "title": "Current-workspace filter","tier": "host", "required": false, "userFacing": true,  "gates": "inject_workspace_meta", "verify": ["codex-orbit-workspace"], "status": "ok",
+      "summary": "Host stamps the real VS Code workspace into the webview HTML (single source of truth) so the sidebar shows ONLY this workspace's chats. Off = the webview falls back to heuristics (every project shows)." },
+
+    { "id": "status-dots",      "title": "Live status dots",        "tier": "host", "required": false, "userFacing": true,  "gates": "expose_status_stream", "verify": ["__codexOrbitStatusHook"], "status": "ok",
+      "summary": "Hooks Codex's updateConversationState so each row shows live status — spinner (thinking), orange (question), red (failed). Off = rows show the relative time only." },
+
+    { "id": "sidebar-sections", "title": "Counted sections",        "tier": "sidebar", "required": true, "userFacing": false, "gates": "render() (SIDEBAR_IIFE)", "verify": [], "status": "ok",
+      "summary": "Collapsible Starred / Pinned / Sessions / Archived headers with count badges, newest-first." },
+    { "id": "sidebar-row",      "title": "Row + hover actions",     "tier": "sidebar", "required": true, "userFacing": false, "gates": "addRow (SIDEBAR_IIFE)", "verify": [], "status": "ok",
+      "summary": "Two-line row (title + time/status), status dot, hover star/pin/color/archive, selected-chat indicator." },
+    { "id": "per-chat-color",   "title": "Per-chat color",          "tier": "sidebar", "required": true, "userFacing": false, "gates": "showColorMenu / right-click swatches", "verify": [], "status": "ok",
+      "summary": "Assign an accent color to a chat (ours; Codex ships no palette). Right-click swatches + hover color button." },
+    { "id": "sidebar-filter",   "title": "Filter menu",             "tier": "sidebar", "required": true, "userFacing": false, "gates": "showFilterMenu", "verify": [], "status": "ok",
+      "summary": "Type (Pinned/Starred/Running/Waiting) + Age filter dropdown." },
+    { "id": "settings-menu",    "title": "Settings menu",           "tier": "sidebar", "required": true, "userFacing": false, "gates": "showSettingsMenu (run-command)", "verify": [], "status": "ok",
+      "summary": "Gear menu posting Codex's own run-command ids (account & usage, switch model/account, custom instructions, color theme) + Copy diagnostics." }
+  ]
+}

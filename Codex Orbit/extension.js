@@ -71,6 +71,17 @@ const GS_LAST_NOTIFIED_CODEX = "codexOrbit.lastNotifiedCodexVersion";
 // Cached rollback registry (patchers/manifest.json), refreshed by the poller so
 // the synchronous detectState() can offer "Use previous version" with no network.
 const GS_PATCHER_MANIFEST = "codexOrbit.patcherManifest";
+// Unchecked (disabled) patch ids, persisted across sessions; passed to the patcher
+// as `--disable id1,id2` on the next Install/Update.
+const GS_DISABLED_PATCHES = "codexOrbit.disabledPatches";
+
+// Patches the user can turn on/off in the sidebar PATCHES section. Each id MUST match
+// the patcher's GATEABLE_FEATURES (stable/patch_codex.py) and a userFacing module in
+// patch_modules/catalog.json. Unchecking one persists to GS_DISABLED_PATCHES.
+const TOGGLEABLE_PATCHES = [
+  { id: "workspace-filter", label: "Current-workspace filter", desc: "Show only this workspace's chats (off = every project)." },
+  { id: "status-dots",      label: "Live status dots",         desc: "Spinner / question / failed status on each chat (off = time only)." },
+];
 
 function activate(context) {
   const provider = new SidebarProvider(context);
@@ -511,6 +522,12 @@ class SidebarProvider {
 
   async onMessage(msg) {
     if (msg.type === "refresh") return this.pushState();
+    if (msg.type === "setDisabledPatches") {
+      const ids = Array.isArray(msg.ids) ? msg.ids.filter((x) => typeof x === "string") : [];
+      await this.context.globalState.update(GS_DISABLED_PATCHES, ids);
+      this.log("Patch selection saved (left out: " + (ids.join(", ") || "none") + ")");
+      return;
+    }
     if (msg.type === "restart") {
       try {
         await vscode.commands.executeCommand("workbench.extensions.action.restartExtensions");
@@ -759,6 +776,8 @@ class SidebarProvider {
     // patcher fails closed on an unverified build, which is what bricks "newest").
     const targetCodex = readBundledStableVersion(this.context);
     const args = [STOCK_ID, "--out", out, "--download-dir", work, "--patcher-version", patcherVersion, "--version", targetCodex];
+    const disabledPatches = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];
+    if (disabledPatches.length) { args.push("--disable", disabledPatches.join(",")); this.log("Leaving out patches: " + disabledPatches.join(", ")); }
     this.log("Downloading + patching " + STOCK_ID + " v" + targetCodex + " (patcher v" + patcherVersion + ", " + patcherSource + ")");
     this.checkCancelled();
     await runPython(python, patcher, args, (line) => this.log(line), (proc) => { this.activeProc = proc; });
@@ -821,6 +840,8 @@ class SidebarProvider {
     const out = path.join(work, "patched.vsix");
     const args = [STOCK_ID, "--out", out, "--download-dir", work,
                   "--patcher-version", entry.version, "--version", entry.codex];
+    const disabledPatchesPrev = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];
+    if (disabledPatchesPrev.length) args.push("--disable", disabledPatchesPrev.join(","));
     this.log("Downloading + patching Codex v" + entry.codex + " with patcher v" + entry.version + " (rollback)");
     this.checkCancelled();
     await runPython(python, patcherPath, args, (line) => this.log(line), (proc) => { this.activeProc = proc; });
@@ -926,6 +947,14 @@ class SidebarProvider {
     // Split into two labelled sections: VS Code extensions vs companies.
     const recExtHtml = recs.filter(r => !r.company).map(renderRec).join("");
     const recCompanyHtml = recs.filter(r => r.company).map(renderRec).join("");
+    // PATCHES section: one checkbox per toggleable patch, checked unless the id is in
+    // the persisted disabled set.
+    const disabledPatches = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];
+    const patchTogglesHtml = TOGGLEABLE_PATCHES.map(p => `
+        <label class="patchRow">
+          <input type="checkbox" class="patchChk" data-patch-id="${p.id}"${disabledPatches.includes(p.id) ? "" : " checked"}/>
+          <span class="patchInfo"><span class="patchName">${p.label}</span><span class="patchDesc">${p.desc}</span></span>
+        </label>`).join("");
     let version = "";
     try {
       version = JSON.parse(fs.readFileSync(
@@ -1108,6 +1137,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 /* recommended extensions block — grows to fill the panel's free space (the
    patched state has little else to show, so the ads get the real estate) and
    centers its enlarged cards vertically between the buttons and the footer. */
+.patchPicker{margin-top:14px;border-top:1px solid rgba(127,127,127,.18);padding-top:10px;text-align:left}
+.patchPickerHeader{appearance:none;border:0;background:none;color:var(--vscode-foreground);
+  display:flex;align-items:center;gap:6px;width:100%;cursor:pointer;
+  font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;opacity:.7;padding:2px 0}
+.patchPickerHeader:hover{opacity:1}
+.patchChevron{transition:transform .15s ease;display:inline-block}
+.patchPickerHeader.open .patchChevron{transform:rotate(90deg)}
+.patchPickerNote{font-size:10.5px;opacity:.5;margin:6px 0 8px}
+.patchRow{display:flex;align-items:flex-start;gap:9px;padding:6px 4px;border-radius:7px;cursor:pointer}
+.patchRow:hover{background:rgba(127,127,127,.10)}
+.patchChk{margin-top:2px;flex-shrink:0;accent-color:var(--vscode-button-background,#3794ff);cursor:pointer}
+.patchInfo{display:flex;flex-direction:column;gap:1px}
+.patchName{font-size:12.5px;font-weight:600;line-height:1.2}
+.patchDesc{font-size:10.5px;opacity:.55;line-height:1.3}
 .recommended{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;
   padding-top:22px;min-height:0}
 .recHeader{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
@@ -1185,6 +1228,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
         Previous versions
       </button>
       <div class="hint" id="idleHint"></div>
+      <div class="patchPicker" id="patchPicker">
+        <button class="patchPickerHeader" id="patchPickerHeader" type="button"
+                title="Choose which Orbit patches get applied">
+          <span>Patches</span><span class="patchChevron">›</span>
+        </button>
+        <div class="patchPickerBody" id="patchPickerBody" hidden>
+          <p class="patchPickerNote">Uncheck to leave a patch out — applies the next time you Install / Update.</p>
+          ${patchTogglesHtml}
+        </div>
+      </div>
     </div>
 
     <!-- WORKING -->
@@ -1267,6 +1320,25 @@ const panes = {
   error: document.querySelector('[data-pane="error"]'),
 };
 const recommendedEl = document.querySelector(".recommended");
+
+// PATCHES section: collapse toggle + persist unchecked ids to the host.
+const patchPickerHeader = document.getElementById("patchPickerHeader");
+const patchPickerBody = document.getElementById("patchPickerBody");
+if (patchPickerHeader && patchPickerBody) {
+  patchPickerHeader.addEventListener("click", () => {
+    const willOpen = patchPickerBody.hidden;
+    patchPickerBody.hidden = !willOpen;
+    patchPickerHeader.classList.toggle("open", willOpen);
+  });
+}
+document.querySelectorAll(".patchChk").forEach(chk => {
+  chk.addEventListener("change", () => {
+    const ids = Array.from(document.querySelectorAll(".patchChk"))
+      .filter(c => !c.checked)
+      .map(c => c.dataset.patchId);
+    vscode.postMessage({ type: "setDisabledPatches", ids });
+  });
+});
 const statusEl = document.getElementById("status");
 const stepLabelEl = document.getElementById("stepLabel");
 const stepSubEl = document.getElementById("stepSub");

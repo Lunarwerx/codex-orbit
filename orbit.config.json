@@ -1,0 +1,40 @@
+{
+  "_doc": {
+    "what": "THE swap surface — Codex Orbit's instance of the Orbit Kit (see ORBIT_KIT.md). Every product-specific identity value derives from the canonical fields below.",
+    "note": "Codex Orbit ADOPTS the kit's Patches toggle system + this config surface, but KEEPS its own proven install/OTA flow in Codex Orbit/extension.js. Reason: Codex's patcher is asset-replay, version-pinned to the certified Codex build (stable_version.txt) and fails closed on an unverified Codex, so enable() must pin --version. The kit's Claude-tuned no-pin install flow is intentionally NOT used.",
+    "derived": {
+      "otaBase":            "https://raw.githubusercontent.com/{repo}/main",
+      "otaPatcherUrl":      "{otaBase}/{patcher.dir}/{patcher.entry}",
+      "otaWrapperVsixUrl":  "{otaBase}/latest/{slug}.vsix",
+      "globalStateKeys":    "{ns}.remotePatcherVersion, {ns}.lastNotifiedVersion, {ns}.latestCodexVersion, {ns}.patcherManifest, {ns}.disabledPatches",
+      "viewContainerId":    "{ns}",
+      "viewId":             "{ns}.sidebar",
+      "configSection":      "{ns}",
+      "userAgent":          "{slug}-vscode",
+      "iconPath":           "media/{logo}",
+      "latestVsixName":     "{slug}.vsix",
+      "extName":            "{slug}",
+      "patcherArchiveGlob": "patchers/{patcher.archivePrefix}*.py"
+    }
+  },
+
+  "schemaVersion": 1,
+
+  "target":      "openai.chatgpt",
+  "repo":        "Lunarwerx/codex-orbit",
+  "slug":        "codex-orbit",
+  "ns":          "codexOrbit",
+  "displayName": "Codex Orbit",
+  "publisher":   "LunarWerx",
+  "productNoun": "Codex",
+  "description": "Power-up for Codex: pin, archive, filter, search, and live status.",
+  "keywords":    ["codex", "openai", "chatgpt", "sessions", "patch", "ai"],
+  "wrapperDir":  "Codex Orbit",
+  "logo":        "codex-orbit.png",
+
+  "patcher": {
+    "dir":           "stable",
+    "entry":         "patch_codex.py",
+    "archivePrefix": "patch_codex-"
+  }
+}
