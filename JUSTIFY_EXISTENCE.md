@@ -435,6 +435,43 @@ then locals show the relative time and the spinner/orange only light up for stat
 already read (remote tasks). **Verdict:** live; strict-module parse passes. Bumped
 `0.5.23 → 0.5.24`, archived as build #39.
 
+## Orbit Kit alignment — Patches toggle system (wrapper 1.2.0 / patcher 0.5.32)
+
+**Files:** `orbit.config.json`, `ORBIT_KIT.md`, `patch_modules/catalog.json`,
+`tools/orbit_config.py`, `tools/patches.py`, `Codex Orbit/extension.js`, `stable/patch_codex.py`
+
+Adopt Claude Code Orbit's "Orbit Kit": one product-agnostic wrapper, the swap surface is
+`orbit.config.json`, and features become **toggleable Patches** the user checks on/off.
+
+- **What we took:** the kit's **Patches system** + the kit identity surface
+  (`orbit.config.json` for Codex, `patch_modules/catalog.json` describing our modules, the
+  `tools/`). The wrapper's PATCHES section (a collapsible checkbox list) persists the
+  unchecked ids to `codexOrbit.disabledPatches` and passes `--disable id1,id2` to the
+  patcher on the next Install/Update. Patcher side: `GATEABLE_FEATURES` + `feature_on()` +
+  `--disable/--enable` args gate the matching injection. Two toggles ship:
+  `workspace-filter` (gates `inject_workspace_meta`) and `status-dots` (gates
+  `expose_status_stream`). Verified: `--disable` skips them (host `<meta>` absent / status
+  hook not injected), no-disable applies both.
+- **What we did NOT take, and why (justify-or-die).** The user asked to "use theirs" wholesale.
+  A subagent ported the full 2900-line kit wrapper; verification proved the kit wrapper is
+  **Claude-coupled in the CORE install flow, not just detection**: its `enable()` patches the
+  NEWEST Codex with **no `--version` pin**, but our asset-replay patcher *fails closed* on any
+  unverified Codex (it must pin to the certified build via `stable_version.txt`). A blind swap
+  meant re-validating the entire **unrecoverable** install/OTA path against Codex with no
+  runtime test — the exact "massive problem" the user told us to flag. So we **kept our proven
+  install/detection/OTA flow** (codex-orbit-patch.json marker, `def copy_patched_assets` OTA
+  guard, version-pinned `enable()`, the reaper deleted/never-ported) and **grafted only the
+  kit's Patches additions** onto it. Same end state (Patches + kit config), zero risk to the
+  update path. **Primitive:** our wrapper and the kit share one ancestor, so "graft the
+  Patches delta" reuses the kit's exact UI/CSS/JS verbatim — not a fork, a cherry-pick.
+- **Kit-identity is real but install stays ours:** `orbit.config.json` documents Codex's 12
+  swap fields; `tools/orbit_config.py`/`patches.py` are the kit's drift/registry tooling.
+  `orbit.config.json._doc.note` records that Codex keeps its own version-pinned install flow.
+
+**Verdict:** live; node-check + strict-module parse + full/`--disable` patch runs pass; all
+graft markers + preserved detection confirmed in the built VSIX. Wrapper `1.1.13 → 1.2.0`
+(ships via OTA), patcher `0.5.31 → 0.5.32`, archived as build #47.
+
 ## Live per-chat status — the real wiring (v0.5.25)
 
 **Files:** `stable/patch_codex.py`
