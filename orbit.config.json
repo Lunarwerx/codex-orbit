@@ -29,7 +29,7 @@
   "productNoun": "Codex",
   "description": "Power-up for Codex: pin, archive, filter, search, and live status.",
   "keywords":    ["codex", "openai", "chatgpt", "sessions", "patch", "ai"],
-  "wrapperDir":  "Codex Orbit",
+  "wrapperDir":  "Codex Orbit-",
   "logo":        "codex-orbit.png",
 
   "patcher": {

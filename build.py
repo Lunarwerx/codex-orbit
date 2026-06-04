@@ -16,7 +16,11 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-WRAPPER_DIR = ROOT / "Codex Orbit"
+# Wrapper dir is "Codex Orbit-" (trailing hyphen on purpose): the user's folder-patcher
+# recurses when a child dir shares its parent's name, so the wrapper dir is kept distinct
+# from the project root "Codex Orbit". The hyphen never reaches the VSIX (files are bundled
+# under "extension/...", not by source-dir name).
+WRAPPER_DIR = ROOT / "Codex Orbit-"
 STABLE_DIR = ROOT / "stable"
 PATCHER_SRC = STABLE_DIR / "patch_codex.py"
 CODEX_ASSETS_DIR = STABLE_DIR / "codex_assets"
@@ -192,7 +196,7 @@ def build(out: Path | None = None) -> Path:
             add_file(zf, files_added, STABLE_README_SRC, "extension/stable/README.md")
         if README_SRC.exists():
             readme = README_SRC.read_text(encoding="utf-8")
-            readme = readme.replace("Codex Orbit/media/", "media/")
+            readme = readme.replace("Codex Orbit-/media/", "media/").replace("Codex Orbit/media/", "media/")
             zf.writestr("extension/README.md", readme)
             files_added.append("extension/README.md")
 
