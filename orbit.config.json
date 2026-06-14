@@ -1,7 +1,7 @@
 {
   "_doc": {
     "what": "THE swap surface — Codex Orbit's instance of the Orbit Kit (see ORBIT_KIT.md). Every product-specific identity value derives from the canonical fields below.",
-    "note": "Codex Orbit ADOPTS the kit's Patches toggle system + this config surface, but KEEPS its own proven install/OTA flow in Codex Orbit/extension.js. Reason: Codex's patcher is asset-replay, version-pinned to the certified Codex build (stable_version.txt) and fails closed on an unverified Codex, so enable() must pin --version. The kit's Claude-tuned no-pin install flow is intentionally NOT used.",
+    "note": "Codex Orbit ADOPTS the kit's Patches toggle system + this config surface, but KEEPS its own proven install/OTA flow in Codex Orbit/extension.js. Reason: the Codex patcher is DYNAMIC (content-anchored injection, no SUPPORTED_VERSION gate) — it patches any openai.chatgpt build and skips anchors that drift rather than failing. Orbit still pins enable() to the CERTIFIED build (stable_version.txt) because it only ships baselines it has test-run, not because the patcher requires it. The kit's Claude-tuned no-pin install flow is intentionally NOT used.",
     "derived": {
       "otaBase":            "https://raw.githubusercontent.com/{repo}/main",
       "otaPatcherUrl":      "{otaBase}/{patcher.dir}/{patcher.entry}",

@@ -10,9 +10,8 @@ happens on the user's machine.
 ## Current Baseline
 
 - Target extension: `openai.chatgpt`
-- Verified Codex version: `26.5519.32039`
-- Stable patcher: `stable/patch_codex.py`
-- Patched asset baseline: `stable/codex_assets/`
+- Certified Codex version: `26.5609.30741`
+- Dynamic patcher: `stable/patch_codex.py` (content-anchored injection)
 - Installed marker: `codex-orbit-patch.json`
 
 ## Features
@@ -45,11 +44,12 @@ python build.py --out .tmp\codex-orbit-test.vsix
 ## Patch A Stock Codex VSIX
 
 ```powershell
-python stable\patch_codex.py Potentials\Codex\openai.chatgpt-26.5519.32039.vsix --out .tmp\codex-test-patched.vsix --patcher-version dev
+python stable\patch_codex.py openai.chatgpt --version 26.5609.30741 --target-platform win32-x64 --out .tmp\codex-test-patched.vsix --patcher-version dev
 ```
 
-The patcher refuses unsupported Codex versions until a new
-`stable/codex_assets` baseline is promoted.
+The patcher is version-agnostic: it injects by content anchor into any
+`openai.chatgpt` build and skips anchors that have drifted rather than failing.
+`stable_version.txt` records the certified build that `enable()` pins to.
 
 ## Release Notes
 
