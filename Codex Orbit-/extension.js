@@ -769,11 +769,11 @@ class SidebarProvider {
         await this.context.globalState.update(GS_REMOTE_PATCHER_VERSION, remoteVersion);
       }
     }
-    // Every shipped version is a verified (patcher, Codex) baseline — there is no
-    // "experimental, chase-the-newest" mode. Pin to the newest Codex we actually
-    // have assets for so the install always succeeds; a newer Codex on the
-    // Marketplace is surfaced as info, never patched blind (the asset-replay
-    // patcher fails closed on an unverified build, which is what bricks "newest").
+    // Every shipped version is a CERTIFIED (patcher, Codex) baseline. Pin the
+    // install to the certified Codex (stable_version.txt) so it always succeeds; a
+    // newer Codex on the Marketplace is surfaced as info, not patched blind. The
+    // patcher itself is DYNAMIC and would patch any build — we pin because we only
+    // ship versions we've test-run, not because the patcher fails on a newer one.
     const targetCodex = readBundledStableVersion(this.context);
     const args = [STOCK_ID, "--out", out, "--download-dir", work, "--patcher-version", patcherVersion, "--version", targetCodex];
     const disabledPatches = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];

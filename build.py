@@ -173,7 +173,11 @@ def build(out: Path | None = None) -> Path:
             add_file(zf, files_added, WRAPPER_DIR / rel, f"extension/{rel.as_posix()}")
 
         add_file(zf, files_added, PATCHER_SRC, "extension/stable/patch_codex.py")
-        add_tree(zf, files_added, CODEX_ASSETS_DIR, "extension/stable/codex_assets")
+        # NOTE: stable/codex_assets is intentionally NOT bundled. The patcher is dynamic
+        # (content-anchored injection) and reads NOTHING from codex_assets at runtime — it
+        # was the old asset-replay baseline. Bundling it just shipped ~2 MB of dead, and
+        # version-stale, minified JS in every VSIX. The repo copy stays only as a dev
+        # reference for tools/ (engine_gate, gen_patch_spec).
         zf.writestr("extension/stable/stable_version.txt", stable_version + "\n")
         zf.writestr("extension/stable/patcher_version.txt", patcher_version + "\n")
         zf.writestr("extension/patch_version.txt", patcher_version + "\n")
