@@ -590,23 +590,80 @@ function patcherHistoryFromManifest(manifest) {
     .map((p) => ({ version: p.version, claude: p.claude, build: (p.build != null ? p.build : null), channel: (p.channel || null) }));
 }
 
+function readInstalledPatchInfo() {
+  try {
+    const ext = vscode.extensions.getExtension(STOCK_ID);
+    if (!ext) return null;
+    const root = ext.extensionUri.fsPath;
+    let marker = null;
+    try {
+      const markerPath = path.join(root, "codex-orbit-patch.json");
+      if (fs.existsSync(markerPath)) marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    } catch (_) {
+      marker = null;
+    }
+
+    const files = [];
+    const legacy = path.join(root, "webview", "index.js");
+    if (fs.existsSync(legacy)) files.push(legacy);
+    const assets = path.join(root, "webview", "assets");
+    if (fs.existsSync(assets)) {
+      try {
+        const names = fs.readdirSync(assets)
+          .filter((name) => /\.js$/i.test(name) && !/\.map$/i.test(name))
+          .sort((a, b) => {
+            const aa = a.startsWith("app-main-") ? 0 : 1;
+            const bb = b.startsWith("app-main-") ? 0 : 1;
+            return aa - bb || a.localeCompare(b);
+          });
+        for (const name of names) files.push(path.join(assets, name));
+      } catch (_) {}
+    }
+
+    let buildVersion = null;
+    let channel = null;
+    let hasOrbitCode = false;
+    for (const file of files) {
+      let text = "";
+      try { text = fs.readFileSync(file, "utf8"); } catch (_) { continue; }
+      if (!buildVersion) {
+        const m = text.match(/ccPatchBuildVersion\s*=\s*["']([^"']+)["']/);
+        if (m) buildVersion = m[1];
+      }
+      if (!channel) {
+        const m = text.match(/ccPatchChannel\s*=\s*["']([^"']+)["']/);
+        const c = m ? m[1].trim().toLowerCase() : null;
+        if (c === "experimental" || c === "stable") channel = c;
+      }
+      if (!hasOrbitCode && (text.includes("__codexOrbitSidebarV4") || text.includes("codexOrbitDump") || text.includes("ccPatchBuildVersion"))) {
+        hasOrbitCode = true;
+      }
+      if (buildVersion && channel && hasOrbitCode) break;
+    }
+
+    const markerVersion = marker && (marker.patcherVersion || marker.version || null);
+    if (!markerVersion && !buildVersion && !hasOrbitCode) return null;
+    return {
+      patched: true,
+      version: buildVersion || markerVersion || null,
+      channel,
+      targetVersion: marker && (marker.targetVersion || marker.claude || marker.codex || null),
+      marker,
+      hasOrbitCode,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Read the currently-installed patcher version from the patched Codex
  * webview. Returns the version string or null if Codex isn't installed
  * or isn't patched.
  */
 function readInstalledPatcherVersion() {
-  try {
-    const ext = vscode.extensions.getExtension(STOCK_ID);
-    if (!ext) return null;
-    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
-    if (!fs.existsSync(jsPath)) return null;
-    const text = fs.readFileSync(jsPath, "utf8");
-    const m = text.match(/ccPatchBuildVersion="([^"]+)"/);
-    return m ? m[1] : null;
-  } catch (_) {
-    return null;
-  }
+  const info = readInstalledPatchInfo();
+  return info ? info.version : null;
 }
 
 /**
@@ -618,18 +675,8 @@ function readInstalledPatcherVersion() {
  * "stable" | null (null only for a pre-channel patched build, pre-1.2.86).
  */
 function readInstalledPatcherChannel() {
-  try {
-    const ext = vscode.extensions.getExtension(STOCK_ID);
-    if (!ext) return null;
-    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
-    if (!fs.existsSync(jsPath)) return null;
-    const text = fs.readFileSync(jsPath, "utf8");
-    const m = text.match(/ccPatchChannel="([^"]+)"/);
-    const c = m ? m[1].trim().toLowerCase() : null;
-    return (c === "experimental" || c === "stable") ? c : null;
-  } catch (_) {
-    return null;
-  }
+  const info = readInstalledPatchInfo();
+  return info ? info.channel : null;
 }
 
 function readBundledWrapperVersion(context) {
@@ -2420,51 +2467,39 @@ function detectState(context) {
   const onLatestClaude = !!claudeCodeVersion && !!latestClaudeVersion && cmpVer(claudeCodeVersion, latestClaudeVersion) >= 0;
 
   try {
-    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
-    if (fs.existsSync(jsPath)) {
-      const text = fs.readFileSync(jsPath, "utf8");
-      const isPatched =
-        text.indexOf("ccPatchSettingsBtn") !== -1 ||
-        text.indexOf("ccPatchSessionItem") !== -1;
-      if (isPatched) {
-        const m = text.match(/ccPatchBuildVersion="([^"]+)"/);
-        const installedVersion = m ? m[1] : null;
-        // The installed tag, read from the patcher itself (ccPatchChannel) — ships
-        // with the patcher, so no inference. null on a pre-1.2.86 patched build.
-        const chMatch = text.match(/ccPatchChannel="([^"]+)"/);
-        const installedChannelRaw = chMatch ? chMatch[1].trim().toLowerCase() : null;
-        const installedChannel = (installedChannelRaw === "experimental" || installedChannelRaw === "stable")
-          ? installedChannelRaw : null;
-        // Determine "outdated" status:
-        //   1. Primary: compare installed vs remote (fetched from GitHub by the
-        //      background poller and cached in globalState).
-        //   2. No marker at all => pre-versioning build, always treat as outdated.
-        const isOutdated = !installedVersion
-          || (remoteVersion && cmpVer(installedVersion, remoteVersion) < 0);
-        // Installed Codex is behind the newest published version:
-        // re-patching pulls the newer Claude and re-applies the same patcher.
-        const claudeUpdateAvailable = !!claudeCodeVersion && !!latestClaudeVersion
-          && cmpVer(claudeCodeVersion, latestClaudeVersion) < 0;
-        // Full version list (newest-first) for the "Previous versions" picker,
-        // plus the single newest-older entry (kept for any internal callers).
-        const manifest = getEffectiveManifest(context);
-        const previousPatcher = pickPreviousPatcher(manifest, installedVersion);
-        const patcherHistory = patcherHistoryFromManifest(manifest);
-        return {
-          state: isOutdated ? "outdated" : "patched",
-          installedVersion,
-          installedChannel,
-          targetVersion,
-          channel,
-          remoteVersion,
-          claudeCodeVersion,
-          latestClaudeVersion,
-          onLatestClaude,
-          claudeUpdateAvailable,
-          previousPatcher,
-          patcherHistory,
-        };
-      }
+    const patchInfo = readInstalledPatchInfo();
+    if (patchInfo && patchInfo.patched) {
+      const installedVersion = patchInfo.version || null;
+      const installedChannel = patchInfo.channel || null;
+      // Determine "outdated" status:
+      //   1. Primary: compare installed vs remote (fetched from GitHub by the
+      //      background poller and cached in globalState).
+      //   2. No marker at all => pre-versioning build, always treat as outdated.
+      const isOutdated = !installedVersion
+        || (remoteVersion && cmpVer(installedVersion, remoteVersion) < 0);
+      // Installed Codex is behind the newest published version:
+      // re-patching pulls the newer Claude and re-applies the same patcher.
+      const claudeUpdateAvailable = !!claudeCodeVersion && !!latestClaudeVersion
+        && cmpVer(claudeCodeVersion, latestClaudeVersion) < 0;
+      // Full version list (newest-first) for the "Previous versions" picker,
+      // plus the single newest-older entry (kept for any internal callers).
+      const manifest = getEffectiveManifest(context);
+      const previousPatcher = pickPreviousPatcher(manifest, installedVersion);
+      const patcherHistory = patcherHistoryFromManifest(manifest);
+      return {
+        state: isOutdated ? "outdated" : "patched",
+        installedVersion,
+        installedChannel,
+        targetVersion,
+        channel,
+        remoteVersion,
+        claudeCodeVersion,
+        latestClaudeVersion,
+        onLatestClaude,
+        claudeUpdateAvailable,
+        previousPatcher,
+        patcherHistory,
+      };
     }
   } catch (_) {}
   return { state: "stock", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion, latestClaudeVersion, onLatestClaude, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached };
