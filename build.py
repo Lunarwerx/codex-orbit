@@ -130,8 +130,38 @@ def add_tree(zf: zipfile.ZipFile, files_added: list[str], src_dir: Path, arc_dir
             add_file(zf, files_added, path, arc)
 
 
+def ensure_sibling_rec(wrapper_dir: Path) -> None:
+    """Re-insert the Claude Code Orbit cross-recommendation into the (already identity-
+    stamped) launcher so Codex Orbit shows Claude Code Orbit — mirroring how Claude Code
+    Orbit shows Codex Orbit.
+
+    WHY: the shared launcher cross-recommends the sibling Orbit product and dynamically
+    hides whichever product is SELF (SELF_EXT_ID). But our identity stamp rewrites the
+    'lunarwerx.claude-code-orbit' rec into a duplicate 'lunarwerx.codex-orbit', which the
+    launcher then hides as self — so Claude Code Orbit vanishes from the list. Until the
+    launcher/stamp is fixed UPSTREAM (its proper home), we re-insert the sibling rec on
+    every build. Idempotent; no-op once the sibling rec is already present."""
+    import re as _re
+    ext = wrapper_dir / "extension.js"
+    if not ext.exists():
+        return
+    text = ext.read_text(encoding="utf-8")
+    if "lunarwerx.claude-code-orbit" in text:
+        return  # already present (e.g. upstream fixed it) — leave it alone
+    claude_rec = ('{ id: "lunarwerx.claude-code-orbit", name: "Claude Code Orbit", '
+                  'tag: "The Orbit patcher for Claude Code.", icon: recIcon("rec-claude-code-orbit.png") }')
+    new, n = _re.subn(r'\{\s*id:\s*"lunarwerx\.codex-orbit",[^}]*\}', claude_rec, text, count=1)
+    if n != 1:
+        print("  [recs] WARNING: no codex-orbit self-rec found to convert; Claude Code "
+              "Orbit rec NOT added (launcher recs format changed — check upstream).")
+        return
+    ext.write_text(new, encoding="utf-8")
+    print("  [recs] re-inserted Claude Code Orbit sibling rec (stamp clobbers it; fix upstream)")
+
+
 def build(out: Path | None = None) -> Path:
     manifest = load_manifest()
+    ensure_sibling_rec(WRAPPER_DIR)
     stable_version = read_required_text(STABLE_VERSION_SRC, "stable Codex version").split()[0]
     patcher_version = read_required_text(STABLE_PATCHER_VERSION_SRC, "stable patcher version").split()[0]
     build_number = None
