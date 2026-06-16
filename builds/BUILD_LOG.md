@@ -55,3 +55,5 @@ a build.
 - **Build #49** - `codex-orbit-build-49.vsix` - pkg 1.2.1, stable Codex 26.5519.32039, patcher 0.5.32 - 2026-06-04 11:23:02
 - **Build #50** - `codex-orbit-build-50.vsix` - pkg 1.2.1, stable Codex 26.5519.32039, patcher 0.5.33 - 2026-06-04 12:10:46
 - **Build #51** - `codex-orbit-build-51.vsix` - pkg 1.2.2, stable Codex 26.5609.30741, patcher 0.5.34 - 2026-06-14 08:05:44
+- **Build #52** - `codex-orbit-build-52.vsix` - pkg 1.2.7, stable Codex 26.5609.30741, patcher 0.5.35 - 2026-06-16 12:07:32
+- **Build #53** - `codex-orbit-build-53.vsix` - pkg 1.2.7, stable Codex 26.5609.30741, patcher 0.5.36 - 2026-06-16 12:48:38

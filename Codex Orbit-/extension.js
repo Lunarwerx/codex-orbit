@@ -1,4 +1,4 @@
-﻿const vscode = require("vscode");
+const vscode = require("vscode");
 const path = require("path");
 const fs = require("fs");
 const cp = require("child_process");
@@ -7,28 +7,35 @@ const https = require("https");
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  🚫 VERSION PROTECTION: Do NOT bump any version number (package.json,   ║
-// ║     patcher_version.txt, stable_version.txt, STABLE_CODEX_VERSION, or  ║
-// ║     any other version pin) without Jacob's explicit permission.         ║
+// ║     patcher_version.txt, certified_claude.txt, or any other version    ║
+// ║     pin) without Jacob's explicit permission.                          ║
 // ║     Rebuilding the VSIX for local testing does NOT require a bump.      ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 const STOCK_ID = "openai.chatgpt";
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  STABLE VERSION: The canonical source of truth is STABLE_VERSION.txt   ║
-// ║  shipped inside this VSIX. Do NOT modify the hardcoded fallback below  ║
-// ║  without explicit permission — update the .txt file instead.           ║
-// ║  Stable mode never uses OTA; it uses the bundled stable/ folder only.  ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-// Hardcoded fallback — only used if the bundled STABLE_VERSION.txt is
-// somehow missing or unreadable. The OTA txt is the source of truth.
-const STABLE_CODEX_VERSION_FALLBACK = "26.5519.32039";
+// Default for this product's own Marketplace id. The recs hide their OWN entry
+// (no self-advertising); at render time we prefer the LIVE id from
+// context.extension.id, so the kit needs zero per-product edits — whatever the
+// extension is named, it hides itself and shows only its sibling.
+const SELF_EXT_ID = "lunarwerx.codex-orbit";
 
-// OTA: normal Enable fetches the latest working patcher from this public repo.
-// Stable mode does not use OTA; it runs the bundled production stable/ files.
+// Patches the user can turn on/off in the sidebar. Each id MUST match the
+// patcher's GATEABLE_FEATURES (Codex/patch_claude_vsix_v147.py). Unchecking
+// one persists to GS_DISABLED_PATCHES and passes --disable <id> to the patcher on
+// the next Install/Update. The list grows as more patches become safely gateable.
+const TOGGLEABLE_PATCHES = [
+  { id: "usage-meter", label: "Account usage rings", desc: "5-hour & weekly usage meter in the composer footer." },
+  { id: "yolo-mode",   label: "YOLO mode",           desc: "New sessions default to bypass-permissions." },
+  { id: "fork-row",    label: "Fork action row",     desc: "Inline Fork / Rewind buttons above each message (off = native dropdown)." },
+];
+
+// OTA: Enable always fetches the latest working patcher from this public repo
+// and patches the newest Codex. No patcher is bundled in the wrapper VSIX:
+// if the authoritative remote cannot be reached, Orbit fails loudly.
 const OTA_BASE = "https://raw.githubusercontent.com/Lunarwerx/codex-orbit/main";
 const OTA_PATCHER_URL = OTA_BASE + "/stable/patch_codex.py";
-const OTA_STABLE_VERSION_URL = OTA_BASE + "/stable/stable_version.txt";
 const OTA_WRAPPER_VERSION_URL = OTA_BASE + "/wrapper_version.txt";
+const OTA_WRAPPER_BUILD_URL = OTA_BASE + "/wrapper_build.txt";
 const OTA_WRAPPER_VSIX_URL = OTA_BASE + "/latest/codex-orbit.vsix";
 const OTA_TIMEOUT_MS = 8000;
 
@@ -40,18 +47,18 @@ const OTA_TIMEOUT_MS = 8000;
 const MARKETPLACE_QUERY_URL =
   "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1";
 
-// OTA patcher-version pin — separate from stable_version.txt (which pins the
-// Codex version). This file contains just the patcher version (e.g. "1.1.4").
-// Orbit polls this in the background so users get notified the moment a new
-// patcher lands on GitHub — no VSIX reinstall needed.
+// OTA patcher-version pin — just the patcher version (e.g. "1.2.66"). Orbit polls
+// this in the background so users get notified the moment a new patcher lands on
+// GitHub — no VSIX reinstall needed.
 const OTA_PATCHER_VERSION_URL = OTA_BASE + "/patcher_version.txt";
+const OTA_RELEASE_CHANNEL_URL = OTA_BASE + "/release_channel.txt";
 
 // OTA rollback registry — patchers/manifest.json lists every archived patcher
-// version + the Codex version each was verified against. Backs the "Use
-// previous version" button: a rollback re-installs an archived patcher pinned to
-// its recorded Codex, so it's always a known-good (patcher, Codex) pair — never
-// an old patcher fired blind at whatever Codex is installed. Patcher files live
-// beside it at /patchers/<file>. Writer: tools/archive_patcher.py.
+// version + the Codex version each was certified against. Backs the
+// "Previous versions" button: a rollback re-installs an archived patcher pinned
+// to its recorded Claude, so it's always a known-good (patcher, Claude) pair —
+// never an old patcher fired blind at whatever Claude is installed. Patcher files
+// live beside it at /patchers/<file>. Writer: tools/archive_patcher.py.
 const OTA_PATCHERS_BASE = OTA_BASE + "/patchers";
 const OTA_PATCHERS_MANIFEST_URL = OTA_PATCHERS_BASE + "/manifest.json";
 
@@ -62,26 +69,25 @@ const STARTUP_DELAY_MS = 30 * 1000;           // wait 30s before first check
 // globalState keys for cross-session persistence of the remote version and
 // notification deduplication.
 const GS_REMOTE_PATCHER_VERSION = "codexOrbit.remotePatcherVersion";
+const GS_RELEASE_CHANNEL = "codexOrbit.releaseChannel";
 const GS_LAST_NOTIFIED_VERSION = "codexOrbit.lastNotifiedVersion";
 // Newest Codex version available on the Marketplace (cached by the poller
 // so the synchronous detectState() can compare without a network call), plus
 // dedup of the "new Codex" notification.
-const GS_LATEST_CODEX_VERSION = "codexOrbit.latestCodexVersion";
-const GS_LAST_NOTIFIED_CODEX = "codexOrbit.lastNotifiedCodexVersion";
+const GS_LATEST_CLAUDE_VERSION = "codexOrbit.latestClaudeVersion";
+const GS_LAST_NOTIFIED_CLAUDE = "codexOrbit.lastNotifiedClaudeVersion";
 // Cached rollback registry (patchers/manifest.json), refreshed by the poller so
 // the synchronous detectState() can offer "Use previous version" with no network.
 const GS_PATCHER_MANIFEST = "codexOrbit.patcherManifest";
-// Unchecked (disabled) patch ids, persisted across sessions; passed to the patcher
-// as `--disable id1,id2` on the next Install/Update.
 const GS_DISABLED_PATCHES = "codexOrbit.disabledPatches";
 
-// Patches the user can turn on/off in the sidebar PATCHES section. Each id MUST match
-// the patcher's GATEABLE_FEATURES (stable/patch_codex.py) and a userFacing module in
-// patch_modules/catalog.json. Unchecking one persists to GS_DISABLED_PATCHES.
-const TOGGLEABLE_PATCHES = [
-  { id: "workspace-filter", label: "Current-workspace filter", desc: "Show only this workspace's chats (off = every project)." },
-  { id: "status-dots",      label: "Live status dots",         desc: "Spinner / question / failed status on each chat (off = time only)." },
-];
+const REAPER_DEFAULT_MIN_AGE_MINUTES = 6;
+const REAPER_DEFAULT_INTERVAL_MINUTES = 3;
+const REAPER_DEFAULT_MAX_RESUME_SESSIONS = 3;
+const REAPER_DEFAULT_RESUME_MIN_AGE_MINUTES = 15;
+const REAPER_DEFAULT_RESUME_MAX_CPU_PERCENT = 1;
+const REAPER_MIN_SAFE_AGE_MINUTES = 5;
+const REAPER_COMMAND_TIMEOUT_MS = 20000;
 
 function activate(context) {
   const provider = new SidebarProvider(context);
@@ -113,8 +119,375 @@ function activate(context) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexOrbit.reapClaudeZombies", async () => {
+      try {
+        const result = await reapClaudeZombies("manual command");
+        const count = result && typeof result.killedCount === "number" ? result.killedCount : 0;
+        vscode.window.showInformationMessage("Codex Orbit reaper killed " + count + " stale process" + (count === 1 ? "." : "es."));
+      } catch (err) {
+        vscode.window.showErrorMessage("Codex Orbit reaper failed: " + (err && err.message ? err.message : String(err)));
+      }
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexOrbit.trimClaudeResumeSessions", async () => {
+      try {
+        const result = await trimClaudeResumeSessions("manual command");
+        const count = result && typeof result.killedCount === "number" ? result.killedCount : 0;
+        vscode.window.showInformationMessage("Codex Orbit trimmed " + count + " idle resumed Claude session" + (count === 1 ? "." : "s."));
+      } catch (err) {
+        vscode.window.showErrorMessage("Codex Orbit resume trim failed: " + (err && err.message ? err.message : String(err)));
+      }
+    })
+  );
+
+  startClaudeZombieReaper(context);
+
   // --- Background patcher-version polling ---
   startBackgroundPolling(context, provider, statusBarItem);
+}
+
+function getReaperConfig() {
+  const cfg = vscode.workspace.getConfiguration("codexOrbit");
+  const enabled = cfg.get("reaper.enabled", true);
+  const minAgeMinutes = Math.max(REAPER_MIN_SAFE_AGE_MINUTES, Number(cfg.get("reaper.minAgeMinutes", REAPER_DEFAULT_MIN_AGE_MINUTES)) || REAPER_DEFAULT_MIN_AGE_MINUTES);
+  const intervalMinutes = Math.max(1, Number(cfg.get("reaper.intervalMinutes", REAPER_DEFAULT_INTERVAL_MINUTES)) || REAPER_DEFAULT_INTERVAL_MINUTES);
+  const trimResumeEnabled = cfg.get("reaper.trimResumeSessions.enabled", false);
+  const maxResumeSessions = Math.max(1, Number(cfg.get("reaper.trimResumeSessions.maxSessions", REAPER_DEFAULT_MAX_RESUME_SESSIONS)) || REAPER_DEFAULT_MAX_RESUME_SESSIONS);
+  const resumeMinAgeMinutes = Math.max(REAPER_MIN_SAFE_AGE_MINUTES, Number(cfg.get("reaper.trimResumeSessions.minAgeMinutes", REAPER_DEFAULT_RESUME_MIN_AGE_MINUTES)) || REAPER_DEFAULT_RESUME_MIN_AGE_MINUTES);
+  const resumeMaxCpuPercent = Math.max(0, Number(cfg.get("reaper.trimResumeSessions.maxCpuPercent", REAPER_DEFAULT_RESUME_MAX_CPU_PERCENT)) || REAPER_DEFAULT_RESUME_MAX_CPU_PERCENT);
+  return { enabled, minAgeMinutes, intervalMinutes, trimResumeEnabled, maxResumeSessions, resumeMinAgeMinutes, resumeMaxCpuPercent };
+}
+
+function startClaudeZombieReaper(context) {
+  if (process.platform !== "win32") return;
+  const run = (reason) => {
+    const cfg = getReaperConfig();
+    if (!cfg.enabled) return;
+    reapClaudeZombies(reason, cfg).then((result) => {
+      if (result && result.killedCount > 0) {
+        console.log("[Codex Orbit] Reaped " + result.killedCount + " stale Codex process(es): " + (result.killed || []).map((p) => p.pid + ":" + p.name).join(", "));
+      }
+    }).catch((err) => {
+      console.warn("[Codex Orbit] Reaper failed: " + (err && err.message ? err.message : err));
+    });
+    if (cfg.trimResumeEnabled) {
+      trimClaudeResumeSessions(reason, cfg).then((result) => {
+        if (result && result.killedCount > 0) {
+          console.log("[Codex Orbit] Trimmed " + result.killedCount + " idle resumed Claude session(s): " + (result.killed || []).map((p) => p.pid + ":" + p.resumeId).join(", "));
+        }
+      }).catch((err) => {
+        console.warn("[Codex Orbit] Resume trim failed: " + (err && err.message ? err.message : err));
+      });
+    }
+  };
+
+  const startup = setTimeout(() => run("orbit startup"), 5000);
+  const interval = setInterval(() => run("orbit interval"), getReaperConfig().intervalMinutes * 60 * 1000);
+  context.subscriptions.push({ dispose: () => clearTimeout(startup) });
+  context.subscriptions.push({ dispose: () => clearInterval(interval) });
+}
+
+function reapClaudeZombies(reason, config) {
+  const cfg = config || getReaperConfig();
+  if (process.platform !== "win32") {
+    return Promise.resolve({ killedCount: 0, killed: [], skipped: "non-windows" });
+  }
+
+  const script = `
+$ErrorActionPreference = "SilentlyContinue"
+$now = Get-Date
+$minAgeMinutes = ${JSON.stringify(Number(cfg.minAgeMinutes))}
+$reason = ${JSON.stringify(String(reason || "unspecified"))}
+$processes = @(Get-CimInstance Win32_Process)
+$byId = @{}
+foreach ($p in $processes) { $byId[[int]$p.ProcessId] = $p }
+
+function Get-ProcessAgeMinutes($p) {
+  try {
+    if ($p.CreationDate) {
+      $created = [Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate)
+      return [math]::Round(($now - $created).TotalMinutes, 2)
+    }
+  } catch {}
+  return 999999
+}
+
+function Has-CodeAncestor($p) {
+  $seen = @{}
+  $cur = $p
+  for ($i = 0; $i -lt 40 -and $cur; $i++) {
+    $parentId = [int]$cur.ParentProcessId
+    if ($parentId -le 0 -or $seen.ContainsKey($parentId)) { return $false }
+    $seen[$parentId] = $true
+    if (-not $byId.ContainsKey($parentId)) { return $false }
+    $parent = $byId[$parentId]
+    if ($parent.Name -ieq "Code.exe") { return $true }
+    $cur = $parent
+  }
+  return $false
+}
+
+function Has-TargetAncestor($p, $targetIds) {
+  $seen = @{}
+  $cur = $p
+  for ($i = 0; $i -lt 40 -and $cur; $i++) {
+    $parentId = [int]$cur.ParentProcessId
+    if ($targetIds.ContainsKey($parentId)) { return $true }
+    if ($parentId -le 0 -or $seen.ContainsKey($parentId)) { return $false }
+    $seen[$parentId] = $true
+    if (-not $byId.ContainsKey($parentId)) { return $false }
+    $cur = $byId[$parentId]
+  }
+  return $false
+}
+
+$claudeTargets = @()
+foreach ($p in $processes) {
+  if ($p.Name -ine "claude.exe") { continue }
+  $exe = [string]$p.ExecutablePath
+  $cmd = [string]$p.CommandLine
+  $isClaudeCodeBinary = ($exe -match "\\\\.vscode\\\\extensions\\\\anthropic\\.claude-code-" -or $cmd -match "\\\\.vscode\\\\extensions\\\\anthropic\\.claude-code-")
+  if (-not $isClaudeCodeBinary) { continue }
+  $age = Get-ProcessAgeMinutes $p
+  if ($age -lt $minAgeMinutes) { continue }
+  if (Has-CodeAncestor $p) { continue }
+  $claudeTargets += $p
+}
+
+$targetIds = @{}
+foreach ($p in $claudeTargets) { $targetIds[[int]$p.ProcessId] = $true }
+
+$descendants = @()
+$allowedDescendants = @("conhost.exe", "bash.exe", "wsl.exe", "wslhost.exe")
+if ($targetIds.Count -gt 0) {
+  foreach ($p in $processes) {
+    if ($targetIds.ContainsKey([int]$p.ProcessId)) { continue }
+    if ($allowedDescendants -notcontains $p.Name) { continue }
+    if (Has-TargetAncestor $p $targetIds) { $descendants += $p }
+  }
+}
+
+$killed = @()
+foreach ($p in @($descendants + $claudeTargets)) {
+  $age = Get-ProcessAgeMinutes $p
+  try {
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+    $killed += [pscustomobject]@{
+      pid = [int]$p.ProcessId
+      name = [string]$p.Name
+      ageMinutes = $age
+      parentProcessId = [int]$p.ParentProcessId
+      executablePath = [string]$p.ExecutablePath
+    }
+  } catch {}
+}
+
+[pscustomobject]@{
+  reason = $reason
+  minAgeMinutes = $minAgeMinutes
+  killedCount = $killed.Count
+  killed = $killed
+} | ConvertTo-Json -Compress -Depth 6
+`;
+
+  return new Promise((resolve, reject) => {
+    cp.execFile(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { windowsHide: true, timeout: REAPER_COMMAND_TIMEOUT_MS },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error((err.message || String(err)) + (stderr ? "\n" + stderr : "")));
+        try {
+          resolve(stdout && stdout.trim() ? JSON.parse(stdout.trim()) : { killedCount: 0, killed: [] });
+        } catch (parseErr) {
+          reject(new Error("Could not parse reaper output: " + (parseErr && parseErr.message ? parseErr.message : parseErr) + "\n" + stdout));
+        }
+      }
+    );
+  });
+}
+
+function trimClaudeResumeSessions(reason, config) {
+  const cfg = config || getReaperConfig();
+  if (process.platform !== "win32") {
+    return Promise.resolve({ killedCount: 0, killed: [], skipped: "non-windows" });
+  }
+
+  const script = `
+$ErrorActionPreference = "SilentlyContinue"
+$now = Get-Date
+$maxSessions = ${JSON.stringify(Number(cfg.maxResumeSessions))}
+$minAgeMinutes = ${JSON.stringify(Number(cfg.resumeMinAgeMinutes))}
+$maxCpuPercent = ${JSON.stringify(Number(cfg.resumeMaxCpuPercent))}
+$reason = ${JSON.stringify(String(reason || "unspecified"))}
+$sampleSeconds = 2
+$processes = @(Get-CimInstance Win32_Process)
+$byId = @{}
+foreach ($p in $processes) { $byId[[int]$p.ProcessId] = $p }
+
+function Get-ProcessAgeMinutes($p) {
+  try {
+    if ($p.CreationDate -is [datetime]) { return [math]::Round(($now - $p.CreationDate).TotalMinutes, 2) }
+    if ($p.CreationDate) {
+      $created = [Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate)
+      return [math]::Round(($now - $created).TotalMinutes, 2)
+    }
+  } catch {}
+  return 999999
+}
+
+function Get-CreatedTicks($p) {
+  try {
+    if ($p.CreationDate -is [datetime]) { return $p.CreationDate.Ticks }
+    if ($p.CreationDate) { return ([Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate)).Ticks }
+  } catch {}
+  return 0
+}
+
+function Has-CodeAncestor($p) {
+  $seen = @{}
+  $cur = $p
+  for ($i = 0; $i -lt 40 -and $cur; $i++) {
+    $parentId = [int]$cur.ParentProcessId
+    if ($parentId -le 0 -or $seen.ContainsKey($parentId)) { return $false }
+    $seen[$parentId] = $true
+    if (-not $byId.ContainsKey($parentId)) { return $false }
+    $parent = $byId[$parentId]
+    if ($parent.Name -ieq "Code.exe") { return $true }
+    $cur = $parent
+  }
+  return $false
+}
+
+function Has-TargetAncestor($p, $targetIds) {
+  $seen = @{}
+  $cur = $p
+  for ($i = 0; $i -lt 40 -and $cur; $i++) {
+    $parentId = [int]$cur.ParentProcessId
+    if ($targetIds.ContainsKey($parentId)) { return $true }
+    if ($parentId -le 0 -or $seen.ContainsKey($parentId)) { return $false }
+    $seen[$parentId] = $true
+    if (-not $byId.ContainsKey($parentId)) { return $false }
+    $cur = $byId[$parentId]
+  }
+  return $false
+}
+
+$resume = @()
+foreach ($p in $processes) {
+  if ($p.Name -ine "claude.exe") { continue }
+  $cmd = [string]$p.CommandLine
+  $exe = [string]$p.ExecutablePath
+  if (-not ($exe -like "*\\.vscode\\extensions\\openai.chatgpt-*" -or $cmd -like "*\\.vscode\\extensions\\openai.chatgpt-*")) { continue }
+  if ($cmd -notlike "*--resume*") { continue }
+  $resumeId = "unknown"
+  $parts = $cmd -split "\\s+"
+  for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+    if ($parts[$i] -eq "--resume") {
+      $resumeId = $parts[$i + 1]
+      break
+    }
+  }
+  if (-not (Has-CodeAncestor $p)) { continue }
+  $resume += [pscustomobject]@{
+    process = $p
+    pid = [int]$p.ProcessId
+    resumeId = $resumeId
+    ageMinutes = Get-ProcessAgeMinutes $p
+    createdTicks = Get-CreatedTicks $p
+  }
+}
+
+if ($resume.Count -le $maxSessions) {
+  [pscustomobject]@{ reason = $reason; killedCount = 0; killed = @(); resumeCount = $resume.Count; maxSessions = $maxSessions } | ConvertTo-Json -Compress -Depth 6
+  exit 0
+}
+
+$before = @{}
+foreach ($r in $resume) {
+  $gp = Get-Process -Id $r.pid -ErrorAction SilentlyContinue
+  if ($gp) {
+    $cpuValue = 0
+    if ($null -ne $gp.CPU) { $cpuValue = [double]$gp.CPU }
+    $before[$r.pid] = $cpuValue
+  }
+}
+Start-Sleep -Seconds $sampleSeconds
+
+$cpuByPid = @{}
+foreach ($r in $resume) {
+  $gp = Get-Process -Id $r.pid -ErrorAction SilentlyContinue
+  if (-not $gp -or -not $before.ContainsKey($r.pid)) { continue }
+  $cpuNow = 0
+  if ($null -ne $gp.CPU) { $cpuNow = [double]$gp.CPU }
+  $delta = [math]::Max(0, ($cpuNow - [double]$before[$r.pid]))
+  $cpuByPid[$r.pid] = [math]::Round(($delta / $sampleSeconds / [Environment]::ProcessorCount) * 100, 2)
+}
+
+$keepIds = @{}
+$resume | Sort-Object createdTicks -Descending | Select-Object -First $maxSessions | ForEach-Object { $keepIds[$_.pid] = $true }
+$eligible = @(
+  $resume |
+    Where-Object { -not $keepIds.ContainsKey($_.pid) -and $_.ageMinutes -ge $minAgeMinutes -and $cpuByPid.ContainsKey($_.pid) -and $cpuByPid[$_.pid] -le $maxCpuPercent } |
+    Sort-Object createdTicks
+)
+
+$targetIds = @{}
+foreach ($r in $eligible) { $targetIds[$r.pid] = $true }
+
+$descendants = @()
+if ($targetIds.Count -gt 0) {
+  foreach ($p in $processes) {
+    if ($targetIds.ContainsKey([int]$p.ProcessId)) { continue }
+    if (Has-TargetAncestor $p $targetIds) { $descendants += $p }
+  }
+}
+
+$killed = @()
+foreach ($p in @($descendants | Sort-Object ProcessId -Descending)) {
+  try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {}
+}
+
+foreach ($r in $eligible) {
+  try {
+    Stop-Process -Id $r.pid -Force -ErrorAction Stop
+    $killed += [pscustomobject]@{
+      pid = $r.pid
+      resumeId = $r.resumeId
+      ageMinutes = $r.ageMinutes
+      cpuPercent = if ($cpuByPid.ContainsKey($r.pid)) { $cpuByPid[$r.pid] } else { $null }
+    }
+  } catch {}
+}
+
+[pscustomobject]@{
+  reason = $reason
+  resumeCount = $resume.Count
+  maxSessions = $maxSessions
+  minAgeMinutes = $minAgeMinutes
+  maxCpuPercent = $maxCpuPercent
+  killedCount = $killed.Count
+  killed = $killed
+} | ConvertTo-Json -Compress -Depth 6
+`;
+
+  return new Promise((resolve, reject) => {
+    cp.execFile(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { windowsHide: true, timeout: REAPER_COMMAND_TIMEOUT_MS },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error((err.message || String(err)) + (stderr ? "\n" + stderr : "")));
+        try {
+          resolve(stdout && stdout.trim() ? JSON.parse(stdout.trim()) : { killedCount: 0, killed: [] });
+        } catch (parseErr) {
+          reject(new Error("Could not parse resume trim output: " + (parseErr && parseErr.message ? parseErr.message : parseErr) + "\n" + stdout));
+        }
+      }
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +513,22 @@ async function fetchRemotePatcherVersion(log) {
   }
 }
 
+// Release channel tag ("experimental" | "stable") for the latest push. Defaults
+// to EXPERIMENTAL on anything unexpected/unreachable, so an untagged or unknown
+// build always shows the cautious red tag rather than a falsely reassuring one.
+async function fetchReleaseChannel(log) {
+  try {
+    const body = await httpsGet(OTA_RELEASE_CHANNEL_URL + "?t=" + Date.now(), OTA_TIMEOUT_MS);
+    const c = body.trim().toLowerCase();
+    if (c === "stable" || c === "experimental") { if (log) log("Release channel: " + c); return c; }
+    if (log) log("Release channel unrecognized (" + JSON.stringify(c) + ") — defaulting to experimental");
+    return "experimental";
+  } catch (err) {
+    if (log) log("Release channel check failed (" + (err && err.message ? err.message : err) + ") — defaulting to experimental");
+    return "experimental";
+  }
+}
+
 /**
  * Fetch the rollback registry (patchers/manifest.json) from the OTA repo.
  * Returns the parsed object {schema, patchers:[...]} on success, or null on any
@@ -162,15 +551,15 @@ async function fetchPatcherManifest(log) {
 /**
  * From a cached manifest, pick the newest archived patcher STRICTLY OLDER than
  * the installed one — the target a "Use previous version" click rolls back to.
- * Returns the entry {version, codex, file, ...} or null when there's nothing
+ * Returns the entry {version, claude, file, ...} or null when there's nothing
  * older. Compatibility is guaranteed by construction: each rollback re-installs
- * its patcher pinned to that entry's recorded Codex version.
+ * its patcher pinned to that entry's recorded Claude version.
  */
 function pickPreviousPatcher(manifest, installedVersion) {
   if (!manifest || !Array.isArray(manifest.patchers) || !installedVersion) return null;
   let best = null;
   for (const p of manifest.patchers) {
-    if (!p || !p.version || !p.file || !p.codex) continue;
+    if (!p || !p.version || !p.file || !p.claude) continue;
     if (cmpVer(p.version, installedVersion) >= 0) continue;      // not older than installed
     if (!best || cmpVer(p.version, best.version) > 0) best = p;  // newest of the older ones
   }
@@ -178,70 +567,69 @@ function pickPreviousPatcher(manifest, installedVersion) {
 }
 
 /**
- * Read the rollback registry bundled inside the Orbit VSIX
- * (extension/patchers/manifest.json). This is the always-available baseline —
- * the picker works the moment Orbit is installed, with no push and no network.
- * Returns the parsed object or null when absent/malformed.
- */
-function readBundledManifest(context) {
-  try {
-    const p = path.join(context.extensionUri.fsPath, "patchers", "manifest.json");
-    if (!fs.existsSync(p)) return null;
-    const data = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (!data || !Array.isArray(data.patchers)) return null;
-    return data;
-  } catch (_) {
-    return null;
-  }
-}
-
-/**
  * The registry detectState/enablePrevious actually use: the OTA-cached manifest
- * when the poller has fetched a non-empty one (it's the superset pushed to
- * orbit), otherwise the copy bundled in the VSIX. So rollback works offline /
- * pre-push from the bundle, and picks up newer versions once they're pushed.
+ * when the poller has fetched a non-empty one.
  */
 function getEffectiveManifest(context) {
   const ota = context.globalState.get(GS_PATCHER_MANIFEST);
   if (ota && Array.isArray(ota.patchers) && ota.patchers.length) return ota;
-  return readBundledManifest(context);
+  return null;
 }
 
 /**
  * Flatten a cached manifest into the version list the "Previous versions" picker
- * renders: newest-first, each {version, codex, build}. Empty array when no
- * registry is cached. The webview shows version · Codex target · build #.
+ * renders: newest-first, each {version, claude, build}. Empty array when no
+ * registry is cached. The webview shows version · Claude target · build #.
  */
 function patcherHistoryFromManifest(manifest) {
   if (!manifest || !Array.isArray(manifest.patchers)) return [];
   return manifest.patchers
-    .filter((p) => p && p.version && p.file && p.codex)
+    .filter((p) => p && p.version && p.file && p.claude)
     .slice()
     .sort((a, b) => cmpVer(b.version, a.version))   // newest first
-    .map((p) => ({ version: p.version, codex: p.codex, build: (p.build != null ? p.build : null) }));
+    .map((p) => ({ version: p.version, claude: p.claude, build: (p.build != null ? p.build : null), channel: (p.channel || null) }));
 }
 
 /**
- * Read the currently-installed Codex Orbit marker from the patched Codex
- * extension. Returns null if Codex is not installed or is still stock.
+ * Read the currently-installed patcher version from the patched Codex
+ * webview. Returns the version string or null if Codex isn't installed
+ * or isn't patched.
  */
-function readInstalledPatchMarker() {
+function readInstalledPatcherVersion() {
   try {
     const ext = vscode.extensions.getExtension(STOCK_ID);
     if (!ext) return null;
-    const markerPath = path.join(ext.extensionUri.fsPath, "codex-orbit-patch.json");
-    if (!fs.existsSync(markerPath)) return null;
-    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    if (!marker || marker.tool !== "Codex Orbit") return null;
-    return marker;
+    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
+    if (!fs.existsSync(jsPath)) return null;
+    const text = fs.readFileSync(jsPath, "utf8");
+    const m = text.match(/ccPatchBuildVersion="([^"]+)"/);
+    return m ? m[1] : null;
   } catch (_) {
     return null;
   }
 }
 
-function readInstalledPatcherVersion() {
-  const marker = readInstalledPatchMarker();
-  return marker && marker.patcherVersion ? marker.patcherVersion : null;
+/**
+ * Read the installed patcher's CHANNEL straight from the patched Codex
+ * webview — the `ccPatchChannel` marker the patcher embeds from its own
+ * ORBIT_CHANNEL constant. This is the authoritative "what am I running" tag: it
+ * ships INSIDE the patcher, so the sidebar reads it back here instead of
+ * inferring it from the manifest or a default. Returns "experimental" |
+ * "stable" | null (null only for a pre-channel patched build, pre-1.2.86).
+ */
+function readInstalledPatcherChannel() {
+  try {
+    const ext = vscode.extensions.getExtension(STOCK_ID);
+    if (!ext) return null;
+    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
+    if (!fs.existsSync(jsPath)) return null;
+    const text = fs.readFileSync(jsPath, "utf8");
+    const m = text.match(/ccPatchChannel="([^"]+)"/);
+    const c = m ? m[1].trim().toLowerCase() : null;
+    return (c === "experimental" || c === "stable") ? c : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function readBundledWrapperVersion(context) {
@@ -251,6 +639,17 @@ function readBundledWrapperVersion(context) {
     return manifest.version || "unknown";
   } catch (_) {
     return "unknown";
+  }
+}
+
+function readBundledWrapperBuild(context) {
+  try {
+    const p = path.join(context.extensionUri.fsPath, "wrapper_build.txt");
+    const raw = fs.readFileSync(p, "utf8").trim().split(/\s+/)[0];
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  } catch (_) {
+    return 0;
   }
 }
 
@@ -267,11 +666,25 @@ async function fetchRemoteWrapperVersion(log) {
   }
 }
 
+async function fetchRemoteWrapperBuild(log) {
+  try {
+    const body = await httpsGet(OTA_WRAPPER_BUILD_URL + "?t=" + Date.now(), OTA_TIMEOUT_MS);
+    const raw = body.trim().split(/\s+/)[0];
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) throw new Error("not a build number: " + JSON.stringify(raw));
+    if (log) log("GitHub Orbit wrapper build: #" + n);
+    return n;
+  } catch (err) {
+    if (log) log("GitHub Orbit wrapper build unavailable (" + (err && err.message ? err.message : err) + ")");
+    return null;
+  }
+}
+
 /**
  * Read the version of the Codex extension currently installed in this
  * VS Code, straight from its manifest. Returns the version string or null.
  */
-function readInstalledCodexVersion() {
+function readInstalledClaudeVersion() {
   try {
     const ext = vscode.extensions.getExtension(STOCK_ID);
     return (ext && ext.packageJSON && ext.packageJSON.version) || null;
@@ -287,7 +700,7 @@ function readInstalledCodexVersion() {
  * Returns the version string, or null on any failure — callers treat null as
  * "unknown, don't prompt" so a flaky network never produces a false alarm.
  */
-function fetchLatestCodexVersion(log) {
+function fetchLatestClaudeVersion(log) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -362,7 +775,7 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
       // In dev mode, still fetch the remote version so you can test
       // the notification flow, but mark the status bar clearly.
       statusBarItem.text = "$(beaker) Orbit Dev";
-      statusBarItem.tooltip = "Codex Orbit — DEV MODE (bundled patcher, fast polling)";
+      statusBarItem.tooltip = "Codex Orbit — DEV MODE (fast polling)";
       statusBarItem.backgroundColor = undefined;
       statusBarItem.show();
     }
@@ -377,6 +790,10 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
     // making its own network call (detectState is synchronous).
     await context.globalState.update(GS_REMOTE_PATCHER_VERSION, remoteVersion);
 
+    // Cache the release channel (experimental/stable) the same way, so the
+    // sidebar hero can tag the available update synchronously.
+    try { await context.globalState.update(GS_RELEASE_CHANNEL, await fetchReleaseChannel()); } catch (_) {}
+
     // Cache the rollback registry too, so detectState() can offer "Use previous
     // version" with no network call. Silent on failure — rollback is optional.
     try {
@@ -388,11 +805,11 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
     // the "Check updates" button can flag "a newer Codex exists — re-patch"
     // even when our (version-agnostic) patcher itself hasn't changed. Refresh the
     // sidebar when the value actually changes so the hero updates without a reload.
-    const prevLatestCodex = context.globalState.get(GS_LATEST_CODEX_VERSION);
-    const latestCodex = await fetchLatestCodexVersion();
-    if (latestCodex) {
-      await context.globalState.update(GS_LATEST_CODEX_VERSION, latestCodex);
-      if (latestCodex !== prevLatestCodex && provider && !provider.busy) provider.pushState();
+    const prevLatestClaude = context.globalState.get(GS_LATEST_CLAUDE_VERSION);
+    const latestClaude = await fetchLatestClaudeVersion();
+    if (latestClaude) {
+      await context.globalState.update(GS_LATEST_CLAUDE_VERSION, latestClaude);
+      if (latestClaude !== prevLatestClaude && provider && !provider.busy) provider.pushState();
     }
 
     const installedVersion = readInstalledPatcherVersion();
@@ -404,11 +821,10 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
       return;
     }
 
-    // A newer Codex is "outdated" only for experimental installs — stable
-    // is a deliberate frozen pin, so we never nag stable users to move off it.
-    const codexVersion = readInstalledCodexVersion();
-    const onStable = !!codexVersion && codexVersion === readBundledStableVersion(context);
-    const codexOutdated = !onStable && !!codexVersion && !!latestCodex && cmpVer(codexVersion, latestCodex) < 0;
+    // A newer Codex shipped → re-patching pulls it. There's no frozen pin
+    // anymore, so this is simply "installed Claude is behind the newest".
+    const claudeCodeVersion = readInstalledClaudeVersion();
+    const claudeOutdated = !!claudeCodeVersion && !!latestClaude && cmpVer(claudeCodeVersion, latestClaude) < 0;
 
     if (cmpVer(installedVersion, remoteVersion) < 0) {
       // --- Update available ---
@@ -428,21 +844,17 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
           provider.triggerEnable();
         }
       }
-    } else if (codexOutdated) {
+    } else if (claudeOutdated) {
       // --- Patcher is current, but a newer Codex shipped. Re-patching
-      //     pulls the newest Codex and re-applies the same experimental patcher. ---
+      //     pulls the newest Claude and re-applies the same experimental patcher. ---
       statusBarItem.text = "$(cloud-download) Orbit Update";
       statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
       statusBarItem.show();
 
-      const lastNotifiedCodex = context.globalState.get(GS_LAST_NOTIFIED_CODEX);
-      if (lastNotifiedCodex !== latestCodex) {
-        await context.globalState.update(GS_LAST_NOTIFIED_CODEX, latestCodex);
-        const stablePin = readBundledStableVersion(context);
-        const verified = cmpVer(latestCodex, stablePin) <= 0;
-        const msg = verified
-          ? `Codex Orbit: Codex v${latestCodex} is available (verified, you're on v${codexVersion}). Re-patch to update?`
-          : `Codex Orbit: Codex v${latestCodex} shipped but isn't verified yet (verified up to v${stablePin}). Try the experimental patch, or stay on stable?`;
+      const lastNotifiedClaude = context.globalState.get(GS_LAST_NOTIFIED_CLAUDE);
+      if (lastNotifiedClaude !== latestClaude) {
+        await context.globalState.update(GS_LAST_NOTIFIED_CLAUDE, latestClaude);
+        const msg = `Codex Orbit: Codex v${latestClaude} is available (you're on v${claudeCodeVersion}). Re-patch to update?`;
         const action = await vscode.window.showInformationMessage(msg, "Update", "Later");
         if (action === "Update") {
           provider.triggerEnable();
@@ -454,6 +866,11 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
       statusBarItem.backgroundColor = undefined;
       statusBarItem.show();
     }
+
+    // Auto-refresh the sidebar so the hero (and its experimental/stable tag)
+    // reflects what this background check just found — without waiting for the
+    // user to open the panel or click "Check for updates".
+    if (provider && !provider.busy) provider.pushState();
   } catch (_) {
     // Offline / unexpected error — silently skip this cycle.
     statusBarItem.hide();
@@ -522,12 +939,6 @@ class SidebarProvider {
 
   async onMessage(msg) {
     if (msg.type === "refresh") return this.pushState();
-    if (msg.type === "setDisabledPatches") {
-      const ids = Array.isArray(msg.ids) ? msg.ids.filter((x) => typeof x === "string") : [];
-      await this.context.globalState.update(GS_DISABLED_PATCHES, ids);
-      this.log("Patch selection saved (left out: " + (ids.join(", ") || "none") + ")");
-      return;
-    }
     if (msg.type === "restart") {
       try {
         await vscode.commands.executeCommand("workbench.extensions.action.restartExtensions");
@@ -542,6 +953,12 @@ class SidebarProvider {
     }
     if (msg.type === "openUrl" && msg.url) {
       try { await vscode.env.openExternal(vscode.Uri.parse(msg.url)); } catch (_) {}
+      return;
+    }
+    if (msg.type === "setDisabledPatches") {
+      const ids = Array.isArray(msg.ids) ? msg.ids.filter((x) => typeof x === "string") : [];
+      await this.context.globalState.update(GS_DISABLED_PATCHES, ids);
+      this.log("Patch selection saved (left out: " + (ids.join(", ") || "none") + ")");
       return;
     }
     if (msg.type === "cancel") {
@@ -562,8 +979,7 @@ class SidebarProvider {
       this.activeProc = null;
       this.send("phase", { phase: "working", action: msg.action });
       try {
-        if (msg.action === "enable") await this.enable(false);
-        else if (msg.action === "enableStable") await this.enable(true);
+        if (msg.action === "enable") await this.enable();
         else if (msg.action === "enablePrevious") await this.enablePrevious(msg.version);
         else if (msg.action === "disable") await this.disable();
         else if (msg.action === "updateWrapper") await this.updateWrapper();
@@ -573,6 +989,8 @@ class SidebarProvider {
           let resultSubHtml = "";   // optional rich breakdown for the "up to date" case
           let updateAvailable = false;
           let updateAction = "enable";
+          let releaseChannel = "experimental";   // declared outside try so the result payload (below) can read it
+          let installedChannel = null;            // the INSTALLED version's channel (for the "patched & current" tag)
           try {
             this.log("Checking GitHub experimental patcher version");
             const remoteVersion = await fetchRemotePatcherVersion((l) => this.log(l));
@@ -581,22 +999,40 @@ class SidebarProvider {
             }
             this.log("Checking GitHub Orbit wrapper version");
             const remoteWrapperVersion = await fetchRemoteWrapperVersion((l) => this.log(l));
+            const remoteWrapperBuild = await fetchRemoteWrapperBuild((l) => this.log(l));
+            // The incoming update's tag is sourced from the patcher's own channel,
+            // mirrored into the manifest at ship time — prefer the manifest entry
+            // for the remote version; fall back to the old release_channel.txt.
+            releaseChannel = await fetchReleaseChannel((l) => this.log(l));
+            try {
+              const remoteManifest = getEffectiveManifest(this.context) || await fetchPatcherManifest((l) => this.log(l));
+              const remoteEntry = remoteManifest && Array.isArray(remoteManifest.patchers)
+                ? remoteManifest.patchers.find(function (p) { return p && p.version === remoteVersion; }) : null;
+              if (remoteEntry && (remoteEntry.channel === "experimental" || remoteEntry.channel === "stable")) {
+                releaseChannel = remoteEntry.channel;
+              }
+            } catch (_) {}
             await this.context.globalState.update(GS_REMOTE_PATCHER_VERSION, remoteVersion);
-            this.log("Checking newest Codex on the Marketplace");
-            const latestCodex = await fetchLatestCodexVersion((l) => this.log(l));
-            if (latestCodex) await this.context.globalState.update(GS_LATEST_CODEX_VERSION, latestCodex);
+            // Use the cached newest-Claude (kept fresh by the background poller) instead
+            // of a slow Marketplace round-trip, so "Check for updates" is GitHub-fast.
+            const latestClaude = this.context.globalState.get(GS_LATEST_CLAUDE_VERSION) || null;
             const installedVersion = readInstalledPatcherVersion();
             const wrapperVersion = readBundledWrapperVersion(this.context);
-            const codexVersion = readInstalledCodexVersion();
-            const onStable = !!codexVersion && codexVersion === readBundledStableVersion(this.context);
-            const codexOutdated = !onStable && !!installedVersion && !!codexVersion && !!latestCodex && cmpVer(codexVersion, latestCodex) < 0;
+            const wrapperBuild = readBundledWrapperBuild(this.context);
+            const claudeCodeVersion = readInstalledClaudeVersion();
+            const claudeOutdated = !!installedVersion && !!claudeCodeVersion && !!latestClaude && cmpVer(claudeCodeVersion, latestClaude) < 0;
             this.log("Reading installed Codex patcher version: " + (installedVersion || "not patched"));
             this.log("Comparing installed patcher against GitHub experimental");
-            if (remoteWrapperVersion && cmpVer(wrapperVersion, remoteWrapperVersion) < 0) {
+            const wrapperVersionOutdated = remoteWrapperVersion && cmpVer(wrapperVersion, remoteWrapperVersion) < 0;
+            const wrapperBuildOutdated = remoteWrapperVersion && cmpVer(wrapperVersion, remoteWrapperVersion) === 0
+              && remoteWrapperBuild != null && remoteWrapperBuild > wrapperBuild;
+            if (wrapperVersionOutdated || wrapperBuildOutdated) {
               updateAvailable = true;
               updateAction = "updateWrapper";
-              resultMsg = "Orbit wrapper v" + remoteWrapperVersion + " is available.";
-              resultSub = "Installed Orbit wrapper is v" + wrapperVersion + ". This updates the sidebar/updater itself from GitHub. Install wrapper update now?";
+              resultMsg = wrapperVersionOutdated
+                ? "Orbit wrapper v" + remoteWrapperVersion + " is available."
+                : "Orbit wrapper build #" + remoteWrapperBuild + " is available.";
+              resultSub = "Installed Orbit wrapper is v" + wrapperVersion + " build #" + wrapperBuild + ". This updates the sidebar/updater itself from GitHub. Install wrapper update now?";
             } else if (!installedVersion) {
               updateAvailable = true;
               resultMsg = "Codex is not patched yet.";
@@ -605,21 +1041,21 @@ class SidebarProvider {
               updateAvailable = true;
               resultMsg = "Experimental patcher v" + remoteVersion + " is available.";
               resultSub = "Installed Codex has patcher v" + installedVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install experimental now?";
-            } else if (codexOutdated) {
+            } else if (claudeOutdated) {
               updateAvailable = true;
               updateAction = "enable";
-              resultMsg = "Codex v" + latestCodex + " is available.";
-              resultSub = "You're patched on Codex v" + codexVersion + " (patch #" + installedVersion + "). Install the newest to move up — or use Previous versions if it misbehaves.";
+              resultMsg = "Codex v" + latestClaude + " is available.";
+              resultSub = "You're patched on Codex v" + claudeCodeVersion + " (patch #" + installedVersion + "). Install the newest to move up — or use Previous versions if it misbehaves.";
             } else {
               // "Tool & target" framing: the patch tool is shown as its own build
-              // NUMBER (#57) aimed at the Codex version it was built/verified
-              // for (the stable pin) — never as a peer "version" that competes with
-              // the Codex number. A dynamic ✓/△ shows whether the Codex you
-              // are actually running is the one the patch tool was tested against.
-              // (All version strings are server-validated semver — safe as HTML.)
-              const stablePin = readBundledStableVersion(this.context);
-              const codexIsNewest = !!latestCodex && !!codexVersion && cmpVer(codexVersion, latestCodex) >= 0;
-              // Build number = trailing segment of the patcher version (1.2.57 -> 57),
+              // The patch tool is shown as its own build NUMBER (#66) aimed at the
+              // Codex version it was certified against (the registry's
+              // certified tag) — never as a peer "version" that competes with the
+              // Codex number. (All version strings are server-validated
+              // semver — safe as HTML.)
+              const certified = readCachedCertifiedClaude(this.context, installedVersion || remoteVersion);
+              const claudeIsNewest = !!latestClaude && !!claudeCodeVersion && cmpVer(claudeCodeVersion, latestClaude) >= 0;
+              // Build number = trailing segment of the patcher version (1.2.66 -> 66),
               // so it reads as a build counter, not a version. Fall back to the whole
               // string if it isn't dotted (e.g. "dev").
               const patchNum = (function () {
@@ -627,34 +1063,32 @@ class SidebarProvider {
                 const seg = v.split(".").pop();
                 return (v.indexOf(".") !== -1 && /^\d+$/.test(seg)) ? seg : (v || "?");
               })();
-              // Is the running Codex one the patch tool was verified against? The
-              // stable pin is the newest Codex Orbit test-ran the patcher on.
-              const builtForOk = !codexVersion || !stablePin || cmpVer(codexVersion, stablePin) <= 0;
-              const exactMatch = !!codexVersion && codexVersion === stablePin;
 
               resultMsg = "You're patched and current.";
+              // Read the installed tag from the PATCHER ITSELF (ccPatchChannel in
+              // the patched webview) — shipped with the patcher, not inferred. Fall
+              // back to the manifest mirror, then the standing default. No "beta":
+              // every shipped patcher carries a real tag now.
+              installedChannel = readInstalledPatcherChannel()
+                || (patcherHistoryFromManifest(getEffectiveManifest(this.context)).find(function (v) { return v && v.version === installedVersion; }) || {}).channel
+                || "experimental";
 
-              const codexNote = codexIsNewest ? "✓ newest" : (onStable ? "✓ verified" : "✓");
-              const patchNote = (builtForOk ? "✓ built for v" : "△ built for v") + (stablePin || "?");
-              const patchNoteCls = builtForOk ? "ok" : "warn";
+              const claudeNote = claudeIsNewest ? "✓ newest" : "✓";
               const row = (label, val, note, cls) =>
                 "<span class=\"verLabel\">" + label + "</span>" +
                 "<span class=\"verVal\">" + val + "</span>" +
                 "<span class=\"verNote " + cls + "\">" + note + "</span>";
 
-              const foot = builtForOk
-                ? "“#" + patchNum + "” is the patch tool’s own build number — not a Codex version. It was built &amp; tested for Codex v" + (stablePin || "?") + (exactMatch ? " — exactly the version you’re running." : ".")
-                : "“#" + patchNum + "” is the patch tool’s own build number — not a Codex version. It was built &amp; tested for Codex v" + (stablePin || "?") + "; you’re on v" + (codexVersion || "?") + ", which is newer — Orbit patched it cleanly and it’s working, but this exact build isn’t verified yet.";
+              const foot = "Patch build #" + patchNum + (certified ? ", built for Codex v" + certified + "." : ".");
 
               resultSubHtml =
                 "<div class=\"verTable\">" +
-                row("Codex", "v" + (codexVersion || "?"), codexNote, "ok") +
-                row("Patch tool", "#" + patchNum, patchNote, patchNoteCls) +
-                row("Orbit app", "v" + wrapperVersion, "✓", "ok") +
+                row("Codex", "v" + (claudeCodeVersion || "?"), claudeNote, "ok") +
+                row("Patch tool", "#" + patchNum, certified ? "✓ built for v" + certified : "✓", "ok") +
                 "</div>" +
                 "<span class=\"subNote\">" + foot + "</span>";
 
-              resultSub = "Patched and current — Codex v" + (codexVersion || "?") + ", Orbit patch tool #" + patchNum + " (built for v" + (stablePin || "?") + "), Orbit app v" + wrapperVersion + ".";
+              resultSub = "Patched and current — Codex v" + (claudeCodeVersion || "?") + ", Orbit patch tool #" + patchNum + (certified ? " (built for v" + certified + ")" : "") + ", Orbit app v" + wrapperVersion + ".";
             }
           } catch (err) {
             this.send("phase", {
@@ -674,6 +1108,7 @@ class SidebarProvider {
             subHtml: resultSubHtml,
             updateAvailable,
             updateAction,
+            channel: updateAvailable ? releaseChannel : installedChannel,
           });
           this.busy = false;
           this.pushState();
@@ -686,15 +1121,11 @@ class SidebarProvider {
             ? "Original Codex restored."
             : msg.action === "updateWrapper"
               ? "Orbit wrapper updated."
-            : msg.action === "enableStable"
-              ? "Verified build installed."
             : msg.action === "enablePrevious"
               ? "Installed patcher v" + (msg.version || "?") + "."
-              : "Experimental Orbit installed.",
+              : "Orbit installed.",
           subMessage: msg.action === "updateWrapper"
             ? "Reload VS Code to start the updated Orbit sidebar."
-            : msg.action === "enableStable"
-            ? "Reload VS Code to start Codex from the verified, known-good bundle."
             : msg.action === "enablePrevious"
             ? "Reload VS Code to start Codex on patcher v" + (msg.version || "?") + "."
             : "Reload VS Code for the change to take effect.",
@@ -743,42 +1174,33 @@ class SidebarProvider {
     this.send("lockCancel");
   }
 
-  async enable(useStable) {
+  async enable() {
     const python = await findPython();
     if (!python) throw new Error("Python not found on PATH. Install Python 3 and retry.");
     this.log("Using Python: " + python);
 
-    const devMode = vscode.workspace.getConfiguration("codexOrbit").get("devMode", false);
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), "codex-orbit-"));
-    const bundledPatcher = path.join(this.context.extensionUri.fsPath, "stable", "patch_codex.py");
-    const otaPatcher = (devMode || useStable) ? null : await fetchOtaPatcher(this.context, (l) => this.log(l));
-    if (devMode) this.log("[DEV] Skipping OTA patcher — using bundled");
-    if (useStable) this.log("[STABLE] Using bundled production patcher only");
-    const patcher = useStable ? bundledPatcher : (otaPatcher || bundledPatcher);
-    const patcherSource = otaPatcher ? "OTA" : "bundled";
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "claude-orbit-"));
+    const patcher = await fetchOtaPatcher(this.context, (l) => this.log(l));
+    if (!patcher) throw new Error("No patcher available: OTA patcher fetch failed.");
+    const patcherSource = "OTA";
     const out = path.join(work, "patched.vsix");
 
-    // Pass the active patcher version so the patcher stamps codex-orbit-patch.json.
-    // detectState() reads it back later to know whether
+    // Pass the active patcher version so the patcher stamps it as ccPatchBuildVersion
+    // in the patched webview. detectState() reads it back later to know whether
     // an installed patch is current or behind a newer Orbit release.
-    let patcherVersion = readBundledPatcherVersion(this.context) || "dev";
-    if (!useStable && otaPatcher) {
-      const remoteVersion = await fetchRemotePatcherVersion((l) => this.log(l));
-      if (remoteVersion) {
-        patcherVersion = remoteVersion;
-        await this.context.globalState.update(GS_REMOTE_PATCHER_VERSION, remoteVersion);
-      }
-    }
-    // Every shipped version is a CERTIFIED (patcher, Codex) baseline. Pin the
-    // install to the certified Codex (stable_version.txt) so it always succeeds; a
-    // newer Codex on the Marketplace is surfaced as info, not patched blind. The
-    // patcher itself is DYNAMIC and would patch any build — we pin because we only
-    // ship versions we've test-run, not because the patcher fails on a newer one.
-    const targetCodex = readBundledStableVersion(this.context);
-    const args = [STOCK_ID, "--out", out, "--download-dir", work, "--patcher-version", patcherVersion, "--version", targetCodex];
+    const patcherVersion = await fetchRemotePatcherVersion((l) => this.log(l));
+    if (!patcherVersion) throw new Error("No patcher version available: remote version marker fetch failed.");
+    await this.context.globalState.update(GS_REMOTE_PATCHER_VERSION, patcherVersion);
+    // Always patch the LATEST Codex (no --version pin). If it ever breaks,
+    // recovery is "Previous versions", which pins each archived patcher to the
+    // Claude version it was certified against.
+    const args = [STOCK_ID, "--out", out, "--download-dir", work, "--patcher-version", patcherVersion];
     const disabledPatches = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];
-    if (disabledPatches.length) { args.push("--disable", disabledPatches.join(",")); this.log("Leaving out patches: " + disabledPatches.join(", ")); }
-    this.log("Downloading + patching " + STOCK_ID + " v" + targetCodex + " (patcher v" + patcherVersion + ", " + patcherSource + ")");
+    if (disabledPatches.length) {
+      args.push("--disable", disabledPatches.join(","));
+      this.log("Leaving out patches: " + disabledPatches.join(", "));
+    }
+    this.log("Downloading + patching latest " + STOCK_ID + " (patcher v" + patcherVersion + ", " + patcherSource + ")");
     this.checkCancelled();
     await runPython(python, patcher, args, (line) => this.log(line), (proc) => { this.activeProc = proc; });
     this.activeProc = null;
@@ -796,53 +1218,35 @@ class SidebarProvider {
 
   // Roll back to an archived patcher version from the registry. Mirrors enable(),
   // but the patcher script is DOWNLOADED from /patchers/<file> and Codex is
-  // pinned to that entry's verified version (same --version pin "Use verified
-  // build" uses) — so a rollback is always a known-good (patcher, Codex) pair.
+  // pinned to that entry's certified version (--version) — so a previous-version
+  // install is always a known-good (patcher, Claude) pair.
   async enablePrevious(version) {
-    const manifest = getEffectiveManifest(this.context);
+    let manifest = getEffectiveManifest(this.context);
+    if (!manifest || !Array.isArray(manifest.patchers) || !manifest.patchers.length) {
+      manifest = await fetchPatcherManifest((l) => this.log(l));
+      if (manifest) await this.context.globalState.update(GS_PATCHER_MANIFEST, manifest);
+    }
     const entry = manifest && Array.isArray(manifest.patchers)
       ? manifest.patchers.find((p) => p && p.version === version) : null;
-    if (!entry || !entry.file || !entry.codex) {
+    if (!entry || !entry.file || !entry.claude) {
       throw new Error("Version v" + version + " is no longer in the registry. Run “Check for updates” and try again.");
     }
     const python = await findPython();
     if (!python) throw new Error("Python not found on PATH. Install Python 3 and retry.");
     this.log("Using Python: " + python);
 
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), "codex-orbit-prev-"));
-    // Roll back to the EXACT archived version: each entry.file is a self-contained
-    // snapshot (patchers/patch_codex-<ver>.py) — run THAT, never the live patcher,
-    // so "Use previous versions" reinstalls precisely the code that shipped as that
-    // version. Prefer the copy bundled in the VSIX (offline/instant); fetch from
-    // GitHub only when this version wasn't bundled with the installed wrapper.
-    const bundledArchived = path.join(this.context.extensionUri.fsPath, "patchers", entry.file);
-    const bundledStable = path.join(this.context.extensionUri.fsPath, "stable", "patch_codex.py");
-    let patcherPath;
-    if (fs.existsSync(bundledArchived)) {
-      patcherPath = bundledArchived;
-      this.log("Using bundled archived patcher v" + entry.version + " (" + entry.file + ")");
-    } else {
-      patcherPath = path.join(work, entry.file);
-      try {
-        this.log("Downloading archived patcher v" + entry.version + " from GitHub");
-        await httpsDownload(OTA_PATCHERS_BASE + "/" + encodeURIComponent(entry.file) + "?t=" + Date.now(), patcherPath, OTA_TIMEOUT_MS * 4);
-      } catch (e) {
-        if (fs.existsSync(bundledStable)) {
-          patcherPath = bundledStable;
-          this.log("Archived v" + entry.version + " unavailable — falling back to live patcher");
-        } else {
-          throw new Error("Patcher v" + entry.version + " is unavailable.");
-        }
-      }
-    }
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "claude-orbit-prev-"));
+    const patcherPath = path.join(work, entry.file);
+    this.log("Downloading archived patcher v" + entry.version + " from GitHub");
+    await httpsDownload(OTA_PATCHERS_BASE + "/" + encodeURIComponent(entry.file) + "?t=" + Date.now(), patcherPath, OTA_TIMEOUT_MS * 4);
     this.checkCancelled();
 
     const out = path.join(work, "patched.vsix");
     const args = [STOCK_ID, "--out", out, "--download-dir", work,
-                  "--patcher-version", entry.version, "--version", entry.codex];
+                  "--patcher-version", entry.version, "--version", entry.claude];
     const disabledPatchesPrev = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];
     if (disabledPatchesPrev.length) args.push("--disable", disabledPatchesPrev.join(","));
-    this.log("Downloading + patching Codex v" + entry.codex + " with patcher v" + entry.version + " (rollback)");
+    this.log("Downloading + patching Codex v" + entry.claude + " with patcher v" + entry.version + " (rollback)");
     this.checkCancelled();
     await runPython(python, patcherPath, args, (line) => this.log(line), (proc) => { this.activeProc = proc; });
     this.activeProc = null;
@@ -859,7 +1263,7 @@ class SidebarProvider {
   }
 
   async updateWrapper() {
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), "codex-orbit-wrapper-"));
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "claude-orbit-wrapper-"));
     const out = path.join(work, "codex-orbit-latest.vsix");
     this.log("Downloading Orbit wrapper VSIX from GitHub");
     await httpsDownload(OTA_WRAPPER_VSIX_URL + "?t=" + Date.now(), out, OTA_TIMEOUT_MS * 4);
@@ -874,13 +1278,10 @@ class SidebarProvider {
     if (!python) throw new Error("Python not found on PATH. Install Python 3 and retry.");
     this.log("Using Python: " + python);
 
-    const devMode = vscode.workspace.getConfiguration("codexOrbit").get("devMode", false);
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), "codex-orbit-"));
-    // For disable we only need the marketplace download logic; both OTA and
-    // bundled patchers do that identically. In dev mode skip OTA.
-    const bundledPatcher = path.join(this.context.extensionUri.fsPath, "stable", "patch_codex.py");
-    const otaPatcher = devMode ? null : await fetchOtaPatcher(this.context, (l) => this.log(l));
-    const patcher = otaPatcher || bundledPatcher;
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "claude-orbit-"));
+    // For disable we use the authoritative OTA patcher only for marketplace download logic.
+    const patcher = await fetchOtaPatcher(this.context, (l) => this.log(l));
+    if (!patcher) throw new Error("No patcher available: OTA patcher fetch failed.");
 
     this.checkCancelled();
     this.log("Downloading original " + STOCK_ID);
@@ -926,10 +1327,10 @@ class SidebarProvider {
     );
     const recs = [
       { id: "lunarwerx.saydeploy",     name: "SayDeploy",                 tag: "Ship from VS Code by telling Copilot what to do.",       icon: recIcon("rec-saydeploy.png") },
-      { id: "lunarwerx.claude-code-orbit", name: "Claude Code Orbit",      tag: "The companion Orbit patcher for Claude Code.",          icon: recIcon("rec-claude-code-orbit.png") },
+      { id: "lunarwerx.codex-orbit",   name: "Codex Orbit",               tag: "The companion Orbit patcher for OpenAI Codex.",         icon: recIcon("rec-codex-orbit.png") },
+      { id: "lunarwerx.codex-orbit", name: "Codex Orbit",     tag: "The Orbit patcher for Codex.",                     icon: recIcon("codex-orbit.png") },
       { id: "lunarwerx.copilot-suite", name: "Copilot AI Productivity Suite", tag: "Turn your snippets into Copilot superpowers.",        icon: recIcon("rec-copilot-suite.png") },
-      { id: "lunarwerx.paramount-docs", name: "Paramount Chat",           tag: "Customer, payment, and analytics context in Copilot.",   icon: recIcon("rec-paramount.png") },
-      { url: "https://connections.icu/", name: "Connexions",              tag: "Relationship intelligence workspace.",                  icon: recIcon("rec-connexions.png"), company: true },
+      { url: "https://connections.icu/", name: "Connections",             tag: "Relationship intelligence workspace.",                  icon: recIcon("rec-connexions.png"), company: true },
     ];
     const renderRec = (r) => {
       const attr = r.company ? `data-url="${r.url}"` : `data-ext-id="${r.id}"`;
@@ -945,25 +1346,24 @@ class SidebarProvider {
       </button>`;
     };
     // Split into two labelled sections: VS Code extensions vs companies.
-    const recExtHtml = recs.filter(r => !r.company).map(renderRec).join("");
-    const recCompanyHtml = recs.filter(r => r.company).map(renderRec).join("");
-    // PATCHES section: one checkbox per toggleable patch, checked unless the id is in
-    // the persisted disabled set.
+    // Hide our OWN entry dynamically from the running extension's live id, so the
+    // kit needs no per-product edit: Codex Orbit hides Codex Orbit,
+    // Codex Orbit hides Codex Orbit, etc. Falls back to SELF_EXT_ID if unavailable.
+    const selfId = String((this.context.extension && this.context.extension.id) || SELF_EXT_ID).toLowerCase();
+    const recExtHtml = recs.filter(r => !r.company && (r.id || "").toLowerCase() !== selfId).map(renderRec).join("");
     const disabledPatches = this.context.globalState.get(GS_DISABLED_PATCHES, []) || [];
     const patchTogglesHtml = TOGGLEABLE_PATCHES.map(p => `
         <label class="patchRow">
           <input type="checkbox" class="patchChk" data-patch-id="${p.id}"${disabledPatches.includes(p.id) ? "" : " checked"}/>
           <span class="patchInfo"><span class="patchName">${p.label}</span><span class="patchDesc">${p.desc}</span></span>
         </label>`).join("");
+    const recCompanyHtml = recs.filter(r => r.company).map(renderRec).join("");
     let version = "";
     try {
       version = JSON.parse(fs.readFileSync(
         path.join(this.context.extensionUri.fsPath, "package.json"), "utf8"
       )).version || "";
     } catch (_) {}
-    // Read stable version from bundled file for display in the HTML.
-    // Falls back to the hardcoded constant if the bundled file is missing.
-    const stableVersion = readBundledStableVersion(this.context);
     return `<!doctype html>
 <html><head>
 <meta charset="utf-8"/>
@@ -1027,7 +1427,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .btn[hidden],.status[hidden]{display:none}
 .btn svg{width:14px;height:14px;flex-shrink:0}
 
-/* Alt-action: small text link styled like "Use verified build v26.5519.32039" */
+/* Alt-action: small text link styled like "Previous versions" */
 .altAction{display:block;margin:6px auto 0;background:none;border:0;cursor:pointer;
   font-size:11px;opacity:.55;color:inherit;padding:6px 10px;text-decoration:underline;
   text-underline-offset:2px;text-align:center;font-family:inherit;width:100%}
@@ -1045,19 +1445,34 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   border:1px solid rgba(249,115,22,.18);animation:fadeIn .3s ease}
 .patchedHero[hidden]{display:none}
 /* updateAvailable variant — same hero shape, blue accent instead of orange,
-   signals "your patched build is behind the bundled patcher" */
+   signals "your patched build is behind the remote patcher" */
 .patchedHero.updateAvailable{
   background:linear-gradient(180deg,rgba(59,130,246,.10),rgba(59,130,246,.02));
   border:1px solid rgba(59,130,246,.28)}
+/* Experimental update -> red hero border + tint (matches the red EXPERIMENTAL
+   tag); stable -> green. Overrides the blue updateAvailable accent above. */
+.patchedHero.updateAvailable.experimental{
+  background:linear-gradient(180deg,rgba(229,72,77,.10),rgba(229,72,77,.02));
+  border-color:rgba(229,72,77,.5)}
+.patchedHero.updateAvailable.stable{
+  background:linear-gradient(180deg,rgba(63,185,80,.10),rgba(63,185,80,.02));
+  border-color:rgba(63,185,80,.45)}
 .patchedTitle{font-size:14px;font-weight:600;margin:0 0 4px;letter-spacing:.01em}
 .patchedSub{font-size:11.5px;opacity:.62;margin:0;line-height:1.5}
 /* Quiet secondary line for the Orbit patch build number — deliberately dimmer
-   and smaller than the Codex version above it, so it never reads as a version
+   and smaller than the Claude version above it, so it never reads as a version
    that's "behind" the Codex release. */
 .patchedMeta{font-size:10px;opacity:.38;margin:5px 0 0;letter-spacing:.02em}
 .patchedMeta[hidden]{display:none}
 /* Green "✓ Latest" badge — confirms you're on the newest Codex. */
 .latestBadge{color:#3fb950;font-weight:600;opacity:.95}
+/* Release-channel tag shown on an available update: red = experimental (the
+   default — "maybe I won't update"), green = stable ("cool, I'll update"). */
+.channelTag{display:inline-block;vertical-align:middle;margin-left:8px;padding:2px 8px;
+  border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.05em}
+.channelTag.experimental{background:rgba(229,72,77,.16);color:#ff6b6b;border:1px solid rgba(229,72,77,.55)}
+.channelTag.stable{background:rgba(63,185,80,.14);color:#5ed27a;border:1px solid rgba(63,185,80,.5)}
+.channelTag.beta{background:rgba(140,140,140,.16);color:#bdbdbd;border:1px solid rgba(140,140,140,.42)}
 
 /* Stock hero — same shape as patched hero, blue accent for the stock state */
 .stockHero{display:flex;flex-direction:column;align-items:center;text-align:center;
@@ -1110,9 +1525,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .verNote.ok{color:#3fb950;opacity:.95}
 .verNote.warn{color:#d29922;opacity:.95}
 /* Version picker list (the "Previous versions" pane) — scrollable rows, each
-   showing version + Codex target + build number, with an Install action. */
-.verList{display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow:auto;
-  margin:4px 0 16px;padding-right:2px}
+   showing version + Claude target + build number, with an Install action. */
+.verList{display:flex;flex-direction:column;gap:6px;max-height:62vh;overflow:auto;
+  margin:4px 0 10px;padding-right:2px}
 .verItem{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:7px;
   border:1px solid rgba(127,127,127,.16);background:rgba(127,127,127,.05)}
 .verItem.current{border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.07)}
@@ -1130,6 +1545,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   color:var(--vscode-button-foreground,#fff)}
 .verItemInstall[disabled]{opacity:.4;cursor:default;border-color:transparent}
 .verEmpty{font-size:12px;opacity:.55;text-align:center;padding:18px 4px}
+.statePane[data-pane="versions"]{position:relative}
+.verBackTop{position:fixed;top:8px;left:8px;z-index:50;
+  background:rgba(127,127,127,.18);border:1px solid rgba(127,127,127,.28);
+  color:var(--vscode-foreground);opacity:1;font-size:12px;font-weight:500;cursor:pointer;
+  font-family:inherit;padding:5px 11px;border-radius:6px;transition:background .12s}
+.verBackTop:hover{background:rgba(127,127,127,.32)}
 .errorSub{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.85;
   background:rgba(239,68,68,.06);padding:9px 11px;border-radius:5px;text-align:left;
   max-height:140px;overflow:auto;border-left:2px solid rgba(239,68,68,.4)}
@@ -1137,6 +1558,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 /* recommended extensions block — grows to fill the panel's free space (the
    patched state has little else to show, so the ads get the real estate) and
    centers its enlarged cards vertically between the buttons and the footer. */
+.recommended{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;
+  padding-top:22px;min-height:0}
+.recHeader{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
+  opacity:.5;text-align:center;margin:0 0 14px}
+.recHeaderCompany{margin-top:20px}
+.recList{display:flex;flex-direction:column;gap:10px}
+.recItem{display:flex;align-items:center;gap:14px;width:100%;text-align:left;
+  padding:14px 16px;border:1px solid rgba(127,127,127,.16);border-radius:10px;
+  background:rgba(127,127,127,.05);color:var(--vscode-foreground);cursor:pointer;
+  font:inherit;transition:background .12s ease,border-color .12s ease,transform .08s ease}
+.recItem:hover{background:rgba(127,127,127,.12);border-color:rgba(127,127,127,.28)}
+.recItem:active{transform:translateY(1px)}
 .patchPicker{margin-top:14px;border-top:1px solid rgba(127,127,127,.18);padding-top:10px;text-align:left}
 .patchPickerHeader{appearance:none;border:0;background:none;color:var(--vscode-foreground);
   display:flex;align-items:center;gap:6px;width:100%;cursor:pointer;
@@ -1151,18 +1584,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .patchInfo{display:flex;flex-direction:column;gap:1px}
 .patchName{font-size:12.5px;font-weight:600;line-height:1.2}
 .patchDesc{font-size:10.5px;opacity:.55;line-height:1.3}
-.recommended{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;
-  padding-top:22px;min-height:0}
-.recHeader{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
-  opacity:.5;text-align:center;margin:0 0 14px}
-.recHeaderCompany{margin-top:20px}
-.recList{display:flex;flex-direction:column;gap:10px}
-.recItem{display:flex;align-items:center;gap:14px;width:100%;text-align:left;
-  padding:14px 16px;border:1px solid rgba(127,127,127,.16);border-radius:10px;
-  background:rgba(127,127,127,.05);color:var(--vscode-foreground);cursor:pointer;
-  font:inherit;transition:background .12s ease,border-color .12s ease,transform .08s ease}
-.recItem:hover{background:rgba(127,127,127,.12);border-color:rgba(127,127,127,.28)}
-.recItem:active{transform:translateY(1px)}
 .recIcon{width:44px;height:44px;flex-shrink:0;border-radius:9px;object-fit:contain}
 .recBody{flex:1;min-width:0}
 .recName{font-size:14px;font-weight:600;line-height:1.25;
@@ -1260,15 +1681,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
         Restart Codex
       </button>
       <button class="btn" data-action="back">Back</button>
-      <button class="altAction globalVersions" hidden>Use previous versions</button>
     </div>
 
     <!-- VERSIONS (picker) -->
     <div class="statePane" data-pane="versions">
+      <button class="verBackTop" data-action="back">Back</button>
       <p class="doneMsg">Choose a version</p>
-      <p class="doneSub">Each row shows the patcher version, the Codex it’s built for, and its build number. If the newest misbehaves, install an earlier one.</p>
+      <p class="doneSub">Install an earlier version if the newest one misbehaves.</p>
       <div class="verList" id="verList"></div>
-      <button class="btn" data-action="back">Back</button>
     </div>
 
     <!-- CONFIRM (install a chosen version) -->
@@ -1288,7 +1708,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
       <p class="errorSub" id="errorSub"></p>
       <button class="btn primary" data-action="enable">Install newest</button>
       <button class="btn" data-action="back">Back</button>
-      <button class="altAction globalVersions" hidden>Use previous versions</button>
     </div>
 
   </div>
@@ -1303,14 +1722,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   <div class="footer">
     <span class="detailsToggle" id="detailsToggle">Show details</span>
     <pre class="log" id="log"></pre>
-    <div class="brand">CODEX ORBIT${version ? " v" + version : ""}</div>
+    <div class="brand">CLAUDE CODE ORBIT${version ? " v" + version : ""}</div>
   </div>
 
 </div>
 
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-const STABLE_CODEX_VERSION = "${stableVersion}";
 const panes = {
   idle: document.querySelector('[data-pane="idle"]'),
   working: document.querySelector('[data-pane="working"]'),
@@ -1320,25 +1738,6 @@ const panes = {
   error: document.querySelector('[data-pane="error"]'),
 };
 const recommendedEl = document.querySelector(".recommended");
-
-// PATCHES section: collapse toggle + persist unchecked ids to the host.
-const patchPickerHeader = document.getElementById("patchPickerHeader");
-const patchPickerBody = document.getElementById("patchPickerBody");
-if (patchPickerHeader && patchPickerBody) {
-  patchPickerHeader.addEventListener("click", () => {
-    const willOpen = patchPickerBody.hidden;
-    patchPickerBody.hidden = !willOpen;
-    patchPickerHeader.classList.toggle("open", willOpen);
-  });
-}
-document.querySelectorAll(".patchChk").forEach(chk => {
-  chk.addEventListener("change", () => {
-    const ids = Array.from(document.querySelectorAll(".patchChk"))
-      .filter(c => !c.checked)
-      .map(c => c.dataset.patchId);
-    vscode.postMessage({ type: "setDisabledPatches", ids });
-  });
-});
 const statusEl = document.getElementById("status");
 const stepLabelEl = document.getElementById("stepLabel");
 const stepSubEl = document.getElementById("stepSub");
@@ -1380,20 +1779,22 @@ const ICON_REFRESH = '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor"
 
 function applyIdleState(state, info) {
   const installedVersion = info && info.installedVersion;
-  const bundledVersion = info && info.bundledVersion;
-  const codexVersion = info && info.codexVersion;
-  const latestCodexVersion = info && info.latestCodexVersion;
-  const onLatestCodex = info && info.onLatestCodex;
-  const codexUpdateAvailable = info && info.codexUpdateAvailable;
+  const targetVersion = info && info.targetVersion;
+  const claudeCodeVersion = info && info.claudeCodeVersion;
+  const latestClaudeVersion = info && info.latestClaudeVersion;
+  const onLatestClaude = info && info.onLatestClaude;
+  const claudeUpdateAvailable = info && info.claudeUpdateAvailable;
   const patcherHistory = (info && info.patcherHistory) || [];
+  const channel = info && info.channel;
+  const installedChannel = info && info.installedChannel;   // read from the patcher itself (ccPatchChannel)
 
   // "Install newest" is the always-present primary verb (was "Use experimental").
   enableBtnIcon.innerHTML = ICON_CHECK;
   enableBtnLabel.textContent = "Install newest";
 
   // "Previous versions" picker is offered whenever the registry holds a version
-  // other than the one installed — the only safety net now that there's no
-  // separate "stable": if the newest misbehaves, install an earlier one.
+  // other than the one installed — the safety net: if the newest misbehaves,
+  // install an earlier one.
   const hasOtherVersions = patcherHistory.some(v => v && v.version && v.version !== installedVersion);
   versionsBtn.hidden = true;
 
@@ -1406,7 +1807,7 @@ function applyIdleState(state, info) {
   disableBtn.hidden = false;
   checkUpdatesBtn.hidden = true;
   statusEl.hidden = false;
-  patchedHero.classList.remove("updateAvailable");
+  patchedHero.classList.remove("updateAvailable", "experimental", "stable");
   patchedMeta.hidden = true;   // quiet patch-# line; only the normal patched view shows it
 
   if (state === "patched") {
@@ -1416,7 +1817,7 @@ function applyIdleState(state, info) {
     checkUpdatesBtn.hidden = false;
     versionsBtn.hidden = !hasOtherVersions;
     versionsBtn.textContent = "Previous versions";
-    if (codexUpdateAvailable) {
+    if (claudeUpdateAvailable) {
       // A newer Codex shipped — surface "install newest" right in the hero.
       patchedHero.classList.add("updateAvailable");
       enableBtn.hidden = false;
@@ -1424,19 +1825,27 @@ function applyIdleState(state, info) {
       enableBtnIcon.innerHTML = ICON_REFRESH;
       disableBtn.title = "Uninstall Orbit and restore the original, unpatched Codex.";
       patchedTitle.textContent = "Codex update available";
-      patchedSub.textContent = "Patched on Codex v" + codexVersion + " (patch #" + installedVersion
-        + "). Codex v" + latestCodexVersion + " is available — install the newest to update.";
-      enableBtnLabel.textContent = "Install newest (v" + latestCodexVersion + ")";
+      patchedSub.textContent = "Patched on Codex v" + claudeCodeVersion + " (patch #" + installedVersion
+        + "). Codex v" + latestClaudeVersion + " is available — install the newest to update.";
+      enableBtnLabel.textContent = "Install newest (v" + latestClaudeVersion + ")";
       enableBtn.title = "Download the newest Codex and re-apply the latest patcher.";
       idleHint.innerHTML = '';
     } else {
       patchedTitle.textContent = "Orbit is enabled";
-      // Codex version is the headline (+ a ✓ Latest badge when on the newest);
+      {
+        // Installed tag read from the patcher itself (ccPatchChannel), with the
+        // manifest mirror as fallback — shipped with the patcher, not inferred.
+        var ccInstCh = installedChannel
+          || (patcherHistory.find(function (v) { return v && v.version === installedVersion; }) || {}).channel;
+        patchedTitle.appendChild(document.createTextNode(" "));
+        patchedTitle.appendChild(ccChannelTag(ccInstCh));
+      }
+      // Claude version is the headline (+ a ✓ Latest badge when on the newest);
       // the Orbit patch # drops to a quiet meta line. Version strings are
       // server-validated semver, so innerHTML here is safe.
-      if (codexVersion) {
-        let head = "Codex v" + codexVersion;
-        if (onLatestCodex) head += ' · <span class="latestBadge">✓ Latest</span>';
+      if (claudeCodeVersion) {
+        let head = "Codex v" + claudeCodeVersion;
+        if (onLatestClaude) head += ' · <span class="latestBadge">✓ Latest</span>';
         patchedSub.innerHTML = head;
       } else {
         patchedSub.textContent = "Codex is running with the patches applied.";
@@ -1453,20 +1862,28 @@ function applyIdleState(state, info) {
   } else if (state === "outdated") {
     patchedHero.hidden = false;
     patchedHero.classList.add("updateAvailable");
+    if (channel) patchedHero.classList.add(channel === "stable" ? "stable" : "experimental");
     stockHero.hidden = true;
     statusEl.hidden = true;
     patchedTitle.textContent = "Update available";
+    if (channel) {
+      var ccHeroTag = document.createElement("span");
+      ccHeroTag.className = "channelTag " + (channel === "stable" ? "stable" : "experimental");
+      ccHeroTag.textContent = channel === "stable" ? "STABLE" : "EXPERIMENTAL";
+      patchedTitle.appendChild(document.createTextNode(" "));
+      patchedTitle.appendChild(ccHeroTag);
+    }
     {
       let line = (installedVersion
-        ? "Patcher v" + installedVersion + " -> v" + (bundledVersion || "?")
-        : "Legacy patches -> v" + (bundledVersion || "?"))
-        + (codexVersion ? " · Codex v" + codexVersion : "");
+        ? "Patcher v" + installedVersion + " -> v" + (targetVersion || "?")
+        : "Legacy patches -> v" + (targetVersion || "?"))
+        + (claudeCodeVersion ? " · Codex v" + claudeCodeVersion : "");
       patchedSub.textContent = line + ".";
     }
     enableBtnIcon.innerHTML = ICON_REFRESH;
     enableBtnLabel.textContent = "Install newest";
     enableBtn.classList.add("primary");
-    enableBtn.title = "Download Codex and patch it with the newest patcher (v" + (bundledVersion || "?") + ").";
+    enableBtn.title = "Download Codex and patch it with the newest patcher (v" + (targetVersion || "?") + ").";
     checkUpdatesBtn.hidden = false;
     versionsBtn.hidden = !hasOtherVersions;
     versionsBtn.textContent = "Previous versions";
@@ -1476,8 +1893,8 @@ function applyIdleState(state, info) {
     patchedHero.hidden = true;
     stockHero.hidden = false;
     statusEl.hidden = true;                // hide pill — stock hero card says it
-    stockSub.textContent = codexVersion
-      ? "Codex v" + codexVersion + " — no Orbit patches yet."
+    stockSub.textContent = claudeCodeVersion
+      ? "Codex v" + claudeCodeVersion + " — no Orbit patches yet."
       : "Codex is installed without Orbit patches.";
     enableBtn.classList.add("primary");
     enableBtn.title = "";
@@ -1487,8 +1904,8 @@ function applyIdleState(state, info) {
     idleHint.innerHTML = 'Install newest downloads <code>openai.chatgpt</code>, pulls the latest patcher, and installs it.';
   } else {
     // "none" — Codex is not installed.  Offer both "Install newest"
-    // (downloads newest Codex + newest patcher) and "Install specific version"
-    // (picker of archived patcher → Codex pairs from the bundled registry).
+    // (downloads newest Claude + newest patcher) and "Install specific version"
+    // (picker of archived patcher -> Claude pairs from the remote registry).
     patchedHero.hidden = true;
     stockHero.hidden = true;
     statusEl.hidden = true;
@@ -1499,13 +1916,25 @@ function applyIdleState(state, info) {
     checkUpdatesBtn.hidden = true;
     versionsBtn.hidden = !hasOtherVersions;
     versionsBtn.textContent = "Install specific version";
-    idleHint.innerHTML = '<b>Install newest</b> downloads <code>openai.chatgpt</code>, pulls the latest patcher, and installs it.<br><b>Install specific version</b> picks an archived patcher + its verified Codex from the registry.';
+    idleHint.innerHTML = '<b>Install newest</b> downloads <code>openai.chatgpt</code>, pulls the latest patcher, and installs it.<br><b>Install specific version</b> picks an archived patcher + its certified Codex from the registry.';
   }
 }
 
 // Build the "Previous versions" picker rows from the latest history snapshot.
-// Each row shows version · Codex target · build #, with an Install action
+// Each row shows version · Claude target · build #, with an Install action
 // (disabled for the version that's already installed).
+// Channel pill used in the version list + patched hero. Every shipped patcher
+// now carries its own tag (ccPatchChannel, mirrored into the manifest), so a
+// missing channel no longer means "legacy/beta" — it falls back to the standing
+// default (experimental, the cautious red tag), never a misleading BETA.
+function ccChannelTag(channel) {
+  var c = (channel === "stable") ? "stable" : "experimental";
+  var t = document.createElement("span");
+  t.className = "channelTag " + c;
+  t.textContent = c === "stable" ? "STABLE" : "EXPERIMENTAL";
+  return t;
+}
+
 function renderVersions() {
   verList.innerHTML = "";
   const list = (lastHistory || []).filter(v => v && v.version);
@@ -1525,15 +1954,10 @@ function renderVersions() {
     const ver = document.createElement("div");
     ver.className = "verItemVer";
     ver.textContent = "v" + v.version;
-    if (isCurrent) {
-      const badge = document.createElement("span");
-      badge.className = "verItemBadge";
-      badge.textContent = "Installed";
-      ver.appendChild(badge);
-    }
+    ver.appendChild(ccChannelTag(v.channel));
     const meta = document.createElement("div");
     meta.className = "verItemMeta";
-    meta.textContent = "Codex " + (v.codex || "?") + (v.build != null ? " · build " + v.build : "");
+    meta.textContent = "Claude " + (v.claude || "?");
     info.appendChild(ver);
     info.appendChild(meta);
     const btn = document.createElement("button");
@@ -1546,7 +1970,7 @@ function renderVersions() {
       btn.addEventListener("click", function () {
         pendingEntry = v;
         confirmMsgEl.textContent = "Install patcher v" + v.version + "?";
-        confirmSubEl.textContent = "Built for Codex " + (v.codex || "?")
+        confirmSubEl.textContent = "Built for Claude " + (v.claude || "?")
           + (v.build != null ? " · build " + v.build : "")
           + ". This replaces your current patch — you can switch back anytime from Previous versions.";
         confirmInstallBtn.textContent = "Install v" + v.version;
@@ -1563,19 +1987,6 @@ versionsBtn.addEventListener("click", function () {
   renderVersions();
   setPane("versions");
 });
-
-// "Use previous versions" links on the done/error panes — the same picker, kept
-// one click away on every pane (except the working/downloading step) so a bad
-// install is always immediately reversible. This is the product's whole safety
-// net: when a pushed patcher misbehaves, roll back to the last good one.
-const globalVersionsBtns = Array.prototype.slice.call(document.querySelectorAll(".globalVersions"));
-globalVersionsBtns.forEach(function (b) {
-  b.addEventListener("click", function () { renderVersions(); setPane("versions"); });
-});
-function refreshGlobalVersions() {
-  const has = (lastHistory || []).some(function (v) { return v && v.version; });
-  globalVersionsBtns.forEach(function (b) { b.hidden = !has; });
-}
 
 // Confirm step → kick off the real install (working pane has the Cancel button).
 confirmInstallBtn.addEventListener("click", function () {
@@ -1655,6 +2066,27 @@ document.querySelectorAll(".recItem").forEach(el => {
   });
 });
 
+// Patch picker — collapse/expand + persist which patches stay enabled. Unchecking
+// a box sends the full disabled set to the extension host; applied on next
+// Install / Update.
+const patchPickerHeader = document.getElementById("patchPickerHeader");
+const patchPickerBody = document.getElementById("patchPickerBody");
+if (patchPickerHeader && patchPickerBody) {
+  patchPickerHeader.addEventListener("click", () => {
+    const willOpen = patchPickerBody.hidden;
+    patchPickerBody.hidden = !willOpen;
+    patchPickerHeader.classList.toggle("open", willOpen);
+  });
+}
+document.querySelectorAll(".patchChk").forEach(chk => {
+  chk.addEventListener("change", () => {
+    const ids = Array.from(document.querySelectorAll(".patchChk"))
+      .filter(c => !c.checked)
+      .map(c => c.dataset.patchId);
+    vscode.postMessage({ type: "setDisabledPatches", ids });
+  });
+});
+
 detailsToggle.addEventListener("click", () => {
   const showing = logEl.classList.toggle("visible");
   detailsToggle.textContent = showing ? "Hide details" : "Show details";
@@ -1691,9 +2123,9 @@ const STEPS = [
   { match: /Checking GitHub Orbit wrapper/i, idx: 1, label: "Checking wrapper", check: true },
   { match: /Reading installed Codex patcher/i, idx: 2, label: "Reading installed patcher", check: true },
   { match: /Comparing installed patcher/i, idx: 3, label: "Comparing versions", check: true },
-  { match: /Downloading openai|Downloading marketplace|Downloading \\+ patching|Downloading original/i, idx: 1, label: "Downloading Codex" },
+  { match: /Downloading anthropic|Downloading marketplace|Downloading \\+ patching|Downloading original/i, idx: 1, label: "Downloading Codex" },
   { match: /Extracting VSIX/i, idx: 2, label: "Extracting" },
-  { match: /Patching Codex webview/i, idx: 2, label: "Applying patches" },
+  { match: /Patching Claude webview/i, idx: 2, label: "Applying patches" },
   { match: /syntax check|Verification passed/i, idx: 3, label: "Verifying" },
   { match: /Writing patched|Patched VSIX written|Overall status/i, idx: 4, label: "Packaging" },
   { match: /Uninstalling current|Installing patched|Installing original|Falling back/i, idx: 5, label: "Installing" },
@@ -1752,17 +2184,24 @@ window.addEventListener("message", (ev) => {
     statusEl.innerHTML = '<span class="dot ' + cls + '"></span><span class="label">' + text + '</span>';
     applyIdleState(m.state, {
       installedVersion: m.installedVersion,
-      bundledVersion: m.bundledVersion,
-      codexVersion: m.codexVersion,
-      latestCodexVersion: m.latestCodexVersion,
-      latestCodexVerified: m.latestCodexVerified,
-      onLatestCodex: m.onLatestCodex,
-      codexUpdateAvailable: m.codexUpdateAvailable,
+      installedChannel: m.installedChannel,
+      targetVersion: m.targetVersion,
+      channel: m.channel,
+      claudeCodeVersion: m.claudeCodeVersion,
+      latestClaudeVersion: m.latestClaudeVersion,
+      onLatestClaude: m.onLatestClaude,
+      claudeUpdateAvailable: m.claudeUpdateAvailable,
       patcherHistory: m.patcherHistory,
     });
     lastHistory = Array.isArray(m.patcherHistory) ? m.patcherHistory : [];
     lastInstalledVersion = m.installedVersion || null;
-    refreshGlobalVersions();
+    // Reveal the idle screen. Panes default to display:none and only show with
+    // the "active" class; the state handler set the idle CONTENT but never
+    // showed the pane, so a fresh panel rendered blank. Don't yank the user out
+    // of an in-progress flow (working/done/confirm/versions/error) when a
+    // background state refresh (visibility / extension-change) arrives.
+    const activePane = Object.keys(panes).find(k => panes[k] && panes[k].classList.contains("active"));
+    if (!activePane || activePane === "idle") setPane("idle");
     return;
   }
   if (m.type === "log") {
@@ -1787,7 +2226,7 @@ window.addEventListener("message", (ev) => {
       // the extension swap). The quick version check has nothing worth cancelling.
       const cb = document.getElementById("cancelBtn");
       if (cb) {
-        const cancellable = ["enable", "enableStable", "enablePrevious", "disable", "updateWrapper"].indexOf(currentAction) !== -1;
+        const cancellable = ["enable", "enablePrevious", "disable", "updateWrapper"].indexOf(currentAction) !== -1;
         cb.hidden = !cancellable;
         cb.disabled = false;
         cb.textContent = "Cancel";
@@ -1801,6 +2240,10 @@ window.addEventListener("message", (ev) => {
       resetCancelButton();
       progressFillEl.style.width = "100%";
       doneMsgEl.textContent = m.message || "All set.";
+      if (m.action === "checkUpdates" && m.channel) {
+        doneMsgEl.appendChild(document.createTextNode(" "));
+        doneMsgEl.appendChild(ccChannelTag(m.channel));
+      }
       const doneSub = document.getElementById("doneSub");
       if (m.subHtml) doneSub.innerHTML = m.subHtml;
       else doneSub.textContent = m.subMessage || "";
@@ -1885,72 +2328,53 @@ function httpsDownload(url, dest, timeoutMs) {
 }
 
 // Pull the latest patcher from the public OTA repo. Sanity-checks the payload
-// looks like our patcher (must contain `def copy_patched_assets`) so a misconfigured
+// looks like our patcher (must contain `patch_webview_js`) so a misconfigured
 // raw URL doesn't silently write garbage. Returns the cached file path on
-// success, or null to signal the caller should use the bundled fallback.
+// success, or null to signal the caller should fail loudly.
 async function fetchOtaPatcher(context, log) {
   try {
     const url = OTA_PATCHER_URL + "?t=" + Date.now();
     log("Fetching OTA patcher: " + url);
     const body = await httpsGet(url, OTA_TIMEOUT_MS);
-    if (body.indexOf("def copy_patched_assets") === -1) {
-      throw new Error("payload missing Codex patcher marker (got " + body.length + " bytes)");
+    if (body.indexOf("def patch_webview_js") === -1) {
+      throw new Error("payload missing patch_webview_js marker (got " + body.length + " bytes)");
     }
     const dir = context.globalStorageUri.fsPath;
     fs.mkdirSync(dir, { recursive: true });
-    const outPath = path.join(dir, "patch_codex_ota.py");
+    const outPath = path.join(dir, "patch_claude_ota.py");
     fs.writeFileSync(outPath, body, "utf8");
     log("OTA patcher loaded (" + body.length + " bytes)");
     return outPath;
   } catch (err) {
-    log("OTA patcher unavailable (" + (err && err.message ? err.message : err) + ") — using bundled");
+    log("OTA patcher unavailable (" + (err && err.message ? err.message : err) + ")");
     return null;
   }
 }
 
-// Pull the OTA stable-version pin. Falls back to STABLE_CODEX_VERSION when
-// the file doesn't exist or isn't reachable.
-async function fetchOtaStableVersion(log) {
-  try {
-    const body = await httpsGet(OTA_STABLE_VERSION_URL, OTA_TIMEOUT_MS);
-    const v = body.trim().split(/\s+/)[0];
-    if (!/^\d+\.\d+\.\d+/.test(v)) throw new Error("not a version: " + JSON.stringify(v));
-    log("OTA stable version pin: " + v);
-    return v;
-  } catch (err) {
-    log("OTA stable version unavailable (" + (err && err.message ? err.message : err) + ") — using bundled " + (readBundledStableVersion({ extensionUri: { fsPath: '' } }) || STABLE_CODEX_VERSION_FALLBACK));
-    return null;
-  }
+// Read the latest patcher version seen from the authoritative remote.
+function readRemotePatcherVersion(context) {
+  return context.globalState.get(GS_REMOTE_PATCHER_VERSION) || null;
 }
 
-// Read the production patcher version shipped inside this VSIX.
-// detectState() uses this as an offline fallback when the remote patcher
-// version from GitHub is unavailable.
-function readBundledPatcherVersion(context) {
-  try {
-    const stablePath = path.join(context.extensionUri.fsPath, "stable", "patcher_version.txt");
-    const legacyPath = path.join(context.extensionUri.fsPath, "patch_version.txt");
-    const p = fs.existsSync(stablePath) ? stablePath : legacyPath;
-    return fs.readFileSync(p, "utf8").trim() || null;
-  } catch (_) {
-    return null;
-  }
+// Release channel ("experimental" | "stable") cached by the background check, so
+// synchronous detectState() can tag the hero without a network call. Defaults to
+// experimental (the cautious red tag) when nothing has been cached yet.
+function readReleaseChannel(context) {
+  const c = context.globalState.get(GS_RELEASE_CHANNEL);
+  return (c === "stable" || c === "experimental") ? c : "experimental";
 }
 
-// Read the stable Codex version shipped inside this VSIX.
-// Returns the version string, or the hardcoded fallback if the file is
-// missing / unreadable.
-function readBundledStableVersion(context) {
-  try {
-    const stablePath = path.join(context.extensionUri.fsPath, "stable", "stable_version.txt");
-    const legacyPath = path.join(context.extensionUri.fsPath, "STABLE_VERSION.txt");
-    const p = fs.existsSync(stablePath) ? stablePath : legacyPath;
-    const v = fs.readFileSync(p, "utf8").trim().split(/\s+/)[0];
-    if (!/^\d+\.\d+\.\d+/.test(v)) throw new Error("not a version: " + JSON.stringify(v));
-    return v;
-  } catch (_) {
-    return STABLE_CODEX_VERSION_FALLBACK;
-  }
+// The Codex version the installed/current remote patcher was certified against.
+function readCachedCertifiedClaude(context, patcherVersion) {
+  const manifest = getEffectiveManifest(context);
+  if (!manifest || !Array.isArray(manifest.patchers)) return null;
+  const entry = manifest.patchers.find((p) => p && p.version === patcherVersion && p.claude);
+  if (entry) return entry.claude;
+  const sorted = manifest.patchers
+    .filter((p) => p && p.version && p.claude)
+    .slice()
+    .sort((a, b) => cmpVer(b.version, a.version));
+  return sorted.length ? sorted[0].claude : null;
 }
 
 function cmpVer(a, b) {
@@ -1965,72 +2389,85 @@ function cmpVer(a, b) {
 }
 
 function detectState(context) {
-  const bundledVersion = readBundledPatcherVersion(context);
+  const remoteVersion = readRemotePatcherVersion(context);
+  const targetVersion = remoteVersion;
   // Read the remote patcher version cached by the background poller into
   // globalState. This is the PRIMARY source of truth for "is my patcher
-  // outdated?" — the bundled version only serves as an offline fallback.
-  const remoteVersion = context.globalState.get(GS_REMOTE_PATCHER_VERSION);
-  // Load the rollback registry now so both "none" and "stock" states can
-  // offer "Install specific version" — the picker needs version entries
-  // and the bundled manifest is always present even before any OTA fetch.
+  // outdated?"
+  // Load the cached rollback registry now so both "none" and "stock" states can
+  // offer "Install specific version" when the remote manifest has been fetched.
   const manifest = getEffectiveManifest(context);
-  const patcherHistoryFallback = patcherHistoryFromManifest(manifest);
+  const patcherHistoryCached = patcherHistoryFromManifest(manifest);
+  // The incoming update's tag is sourced from the patcher's own embedded channel
+  // (mirrored into the manifest at ship time), never a separate side file. Falls
+  // back to the cached release_channel.txt only when the manifest lacks an entry.
+  const channel = (function () {
+    const match = patcherHistoryCached.find(function (p) { return p && p.version === remoteVersion; });
+    if (match && match.channel) return match.channel;
+    if (patcherHistoryCached[0] && patcherHistoryCached[0].channel) return patcherHistoryCached[0].channel;
+    return readReleaseChannel(context);
+  })();
   const ext = vscode.extensions.getExtension(STOCK_ID);
-  if (!ext) return { state: "none", installedVersion: null, bundledVersion, remoteVersion, codexVersion: null, latestCodexVersion: null, latestCodexVerified: false, onLatestCodex: false, onStable: false, codexUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryFallback };
+  if (!ext) return { state: "none", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion: null, latestClaudeVersion: null, onLatestClaude: false, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached };
 
   // Codex's own version, read straight from its package.json via the
-  // Extensions API. Lets us show "Patches active on Codex v26.5519.32039"
-  // and decide whether the user is already on Stable.
-  const codexVersion = (ext.packageJSON && ext.packageJSON.version) || null;
-  // Newest Codex available (cached by the poller). onStable suppresses the
-  // "newer Codex" hint — stable is a deliberate frozen pin, not a stale snapshot.
-  const latestCodexVersion = context.globalState.get(GS_LATEST_CODEX_VERSION) || null;
-  const stablePin = readBundledStableVersion(context);
-  const onStable = !!codexVersion && codexVersion === stablePin;
-  // Is the newest available Codex one we've VERIFIED (<= the stable pin)? The
-  // stable pin is the newest version the patcher was test-run against, so it is
-  // our "verified up to" line. Drives "Update" (verified) vs "Try experimental
-  // (unverified, may break)" wording.
-  const latestCodexVerified = !!latestCodexVersion && cmpVer(latestCodexVersion, stablePin) <= 0;
-  // On the newest Codex we know about (installed >= latest). Only assertable
+  // Extensions API. Lets us show "Patches active on Codex v2.1.150".
+  const claudeCodeVersion = (ext.packageJSON && ext.packageJSON.version) || null;
+  // Newest Codex available (cached by the poller).
+  const latestClaudeVersion = context.globalState.get(GS_LATEST_CLAUDE_VERSION) || null;
+  // On the newest Claude we know about (installed >= latest). Only assertable
   // when we actually have a cached latest — never claim "Latest" blindly.
-  const onLatestCodex = !!codexVersion && !!latestCodexVersion && cmpVer(codexVersion, latestCodexVersion) >= 0;
+  const onLatestClaude = !!claudeCodeVersion && !!latestClaudeVersion && cmpVer(claudeCodeVersion, latestClaudeVersion) >= 0;
 
-  const marker = readInstalledPatchMarker();
-  if (marker) {
-    const installedVersion = marker.patcherVersion || null;
-    // Determine "outdated" status:
-    //   1. Primary: compare installed vs remote (fetched from GitHub by the
-    //      background poller and cached in globalState).
-    //   2. Fallback: if no remote version cached (offline / first launch),
-    //      compare installed vs bundled (shipped in the Orbit VSIX).
-    //   3. No marker version => pre-versioning build, always treat as outdated.
-    const isOutdated = !installedVersion
-      || (remoteVersion && cmpVer(installedVersion, remoteVersion) < 0)
-      || (!remoteVersion && bundledVersion && cmpVer(installedVersion, bundledVersion) < 0);
-    // Experimental snapshot is behind the newest published Codex:
-    // re-patching pulls the newer Codex and re-applies the same patcher.
-    const codexUpdateAvailable = !onStable && !!codexVersion && !!latestCodexVersion
-      && cmpVer(codexVersion, latestCodexVersion) < 0;
-    const manifest = getEffectiveManifest(context);
-    const previousPatcher = pickPreviousPatcher(manifest, installedVersion);
-    const patcherHistory = patcherHistoryFromManifest(manifest);
-    return {
-      state: isOutdated ? "outdated" : "patched",
-      installedVersion,
-      bundledVersion,
-      remoteVersion,
-      codexVersion,
-      latestCodexVersion,
-      latestCodexVerified,
-      onLatestCodex,
-      onStable,
-      codexUpdateAvailable,
-      previousPatcher,
-      patcherHistory,
-    };
-  }
-  return { state: "stock", installedVersion: null, bundledVersion, remoteVersion, codexVersion, latestCodexVersion, latestCodexVerified, onLatestCodex, onStable, codexUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryFallback };
+  try {
+    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
+    if (fs.existsSync(jsPath)) {
+      const text = fs.readFileSync(jsPath, "utf8");
+      const isPatched =
+        text.indexOf("ccPatchSettingsBtn") !== -1 ||
+        text.indexOf("ccPatchSessionItem") !== -1;
+      if (isPatched) {
+        const m = text.match(/ccPatchBuildVersion="([^"]+)"/);
+        const installedVersion = m ? m[1] : null;
+        // The installed tag, read from the patcher itself (ccPatchChannel) — ships
+        // with the patcher, so no inference. null on a pre-1.2.86 patched build.
+        const chMatch = text.match(/ccPatchChannel="([^"]+)"/);
+        const installedChannelRaw = chMatch ? chMatch[1].trim().toLowerCase() : null;
+        const installedChannel = (installedChannelRaw === "experimental" || installedChannelRaw === "stable")
+          ? installedChannelRaw : null;
+        // Determine "outdated" status:
+        //   1. Primary: compare installed vs remote (fetched from GitHub by the
+        //      background poller and cached in globalState).
+        //   2. No marker at all => pre-versioning build, always treat as outdated.
+        const isOutdated = !installedVersion
+          || (remoteVersion && cmpVer(installedVersion, remoteVersion) < 0);
+        // Installed Codex is behind the newest published version:
+        // re-patching pulls the newer Claude and re-applies the same patcher.
+        const claudeUpdateAvailable = !!claudeCodeVersion && !!latestClaudeVersion
+          && cmpVer(claudeCodeVersion, latestClaudeVersion) < 0;
+        // Full version list (newest-first) for the "Previous versions" picker,
+        // plus the single newest-older entry (kept for any internal callers).
+        const manifest = getEffectiveManifest(context);
+        const previousPatcher = pickPreviousPatcher(manifest, installedVersion);
+        const patcherHistory = patcherHistoryFromManifest(manifest);
+        return {
+          state: isOutdated ? "outdated" : "patched",
+          installedVersion,
+          installedChannel,
+          targetVersion,
+          channel,
+          remoteVersion,
+          claudeCodeVersion,
+          latestClaudeVersion,
+          onLatestClaude,
+          claudeUpdateAvailable,
+          previousPatcher,
+          patcherHistory,
+        };
+      }
+    }
+  } catch (_) {}
+  return { state: "stock", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion, latestClaudeVersion, onLatestClaude, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached };
 }
 
 async function findPython() {

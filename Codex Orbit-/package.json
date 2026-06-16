@@ -1,8 +1,8 @@
 {
   "name": "codex-orbit",
   "displayName": "Codex Orbit",
-  "description": "Power-up for Codex: rename, pin, star, search, and organize tasks.",
-  "version": "1.2.2",
+  "description": "Power-up for Codex: pin, archive, filter, search, and YOLO mode.",
+  "version": "1.2.7",
   "publisher": "LunarWerx",
   "license": "MIT",
   "icon": "media/codex-orbit.png",
@@ -14,7 +14,7 @@
     "url": "https://github.com/Lunarwerx/codex-orbit/issues"
   },
   "homepage": "https://github.com/Lunarwerx/codex-orbit#readme",
-  "keywords": ["codex", "openai", "chatgpt", "tasks", "patch", "ai"],
+  "keywords": ["claude", "claude-code", "anthropic", "sessions", "yolo", "patch", "ai"],
   "engines": {
     "vscode": "^1.94.0"
   },
@@ -27,10 +27,62 @@
         "codexOrbit.devMode": {
           "type": "boolean",
           "default": false,
-          "description": "Developer mode: uses the bundled patcher instead of fetching from GitHub. Poll interval reduced to 60s for rapid testing. Enable this when testing patcher changes locally."
+          "description": "Developer mode: reduces the update poll interval to 60s for rapid testing. Patcher installs still fetch from the authoritative remote."
+        },
+        "codexOrbit.reaper.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically kills stale Codex native processes whose process tree no longer belongs to a live VS Code window."
+        },
+        "codexOrbit.reaper.minAgeMinutes": {
+          "type": "number",
+          "default": 6,
+          "minimum": 5,
+          "description": "Minimum age before an orphaned Codex native process is eligible for cleanup. Values below 5 are clamped to 5 minutes."
+        },
+        "codexOrbit.reaper.intervalMinutes": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "How often Codex Orbit checks for stale Codex native processes."
+        },
+        "codexOrbit.reaper.trimResumeSessions.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt-in: trims old, low-CPU resumed Codex native sessions when too many are still running. Keep disabled when long-running chats may be waiting on tools or network."
+        },
+        "codexOrbit.reaper.trimResumeSessions.maxSessions": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Maximum number of idle resumed Codex native sessions to keep running."
+        },
+        "codexOrbit.reaper.trimResumeSessions.minAgeMinutes": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "description": "Minimum age before an idle resumed Codex native session can be trimmed. Values below 5 are clamped to 5 minutes; live resume trimming is opt-in."
+        },
+        "codexOrbit.reaper.trimResumeSessions.maxCpuPercent": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "Maximum sampled CPU percent for a resumed Codex native session to be considered idle enough to trim."
         }
       }
     },
+    "commands": [
+      {
+        "command": "codexOrbit.reapClaudeZombies",
+        "title": "Reap Codex Zombies",
+        "category": "Codex Orbit"
+      },
+      {
+        "command": "codexOrbit.trimClaudeResumeSessions",
+        "title": "Trim Idle Claude Resume Sessions",
+        "category": "Codex Orbit"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {

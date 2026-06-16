@@ -20,7 +20,14 @@ from __future__ import annotations
 import argparse, datetime as dt, json, platform, re, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-__version__ = "0.5.34"
+__version__ = "0.5.36"
+# Release channel that ships INSIDE every patched build. The Orbit launcher reads it
+# back as `ccPatchChannel` from the patched webview (installed tag), and
+# tools/archive_patcher.py mirrors it into the rollback manifest's `channel` field
+# (list/available tag). DEFAULT experimental — only `tools/ship.py --stable` flips it.
+# Format is load-bearing: tools/ship.py and archive_patcher.py read it via the regex
+# ^ORBIT_CHANNEL:\s*str\s*=\s*"([^"]+)" — keep the `: str =` shape.
+ORBIT_CHANNEL: str = "experimental"
 DEFAULT_MARKETPLACE_ITEM = "openai.chatgpt"
 MARKETPLACE_QUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
 LOG_PATH = None
@@ -748,25 +755,37 @@ SIDEBAR_IIFE = r"""
       anchorMenu(m,btn);
     }
     function filterActive(){ const f=filterState; return (f.types&&f.types.length)||f.age; }
-    // ---------- settings menu (our UI, Codex's own run-command actions) ----------
-    // The webview dispatches menu actions via the "run-command" host message
-    // (case 'run-command': md(e.id)&&nu(e.id)). We render Codex's exact 7-item gear menu
-    // and post the SAME command ids. The newest gear menu is from a Codex newer than our
-    // bundled baseline, so a few ids are best-known/derived — a miss is a harmless no-op,
-    // and `window.codexOrbitDump()` reports whether the host channel is live so we can tune.
-    function runCmd(id){ return coxPost("run-command",{id}); }
+    // ---------- settings menu (our UI, Codex's own settings navigation) ----------
+    // Codex's gear/settings actions are NOT a generic "run-command" host message — that
+    // type does not exist in the host (verified against Codex 26.5609: the host's
+    // onDidReceiveMessage switch has zero 'run-command' cases, so such a post is silently
+    // dropped — which is why every old gear item no-op'd while local Copy diagnostics still
+    // worked). Codex opens a settings pane by posting {type:"show-settings",section:<slug>}
+    // to the host, routed by `case'show-settings': this.showSettings({section},e)` ->
+    // navigates /settings/<slug>. Verified slugs in 26.5609: usage, personalization,
+    // appearance, profile (settings-sections-*.js). `window.codexOrbitDump()` reports whether
+    // the host channel is live (hostChannel:true) so this stays diagnosable.
+    function showSettings(section){ return coxPost("show-settings",{section}); }
+    // Log out by replaying Codex's OWN action: its profile button posts {type:"log-out"}
+    // through the vscode-api singleton's LOCAL bus (dispatchHostMessage -> deliverMessage),
+    // NOT to the extension host. We reach that same bus from injected JS via window.postMessage:
+    // the singleton's handleMessage validates e.origin===location.origin (true for a self-post)
+    // then runs deliverMessage("log-out",...) -> Codex's logout handler (et("logout",{hostId})
+    // + navigate to /login). Verified in Codex 26.5609 (vscode-api-*.js, app-main case"log-out").
+    function logOut(){ try{ window.postMessage({type:"log-out"},"*"); return true; }catch(e){ return false; } }
     function showSettingsMenu(btn){
       closeMenu();
       const m=document.createElement("div"); m.className="coxMenu coxSettingsMenu";
       const item=(label,fn)=>{ const b=document.createElement("button"); b.type="button"; b.className="coxMenuItem"; b.textContent=label; b.addEventListener("click",(ev)=>{ ev.stopPropagation(); fn(); closeMenu(); }); m.appendChild(b); };
-      // Only items wired to a real Codex run-command id. YOLO mode / Chat preview header
-      // were removed — their command ids are not in our bundled baseline, so they would be
-      // dead buttons; better to not exist than to lie. (Re-add once we capture the ids.)
-      item("Account & usage",()=>runCmd("settings"));
-      item("Switch model",()=>runCmd("composer.openModelPicker"));
-      item("Switch account",()=>runCmd("logOut"));
-      item("Custom instructions",()=>runCmd("personalitySettings"));
-      item("Color theme",()=>runCmd("switchTheme"));
+      // "Switch model" was removed: composer.openModelPicker is an in-composer popover
+      // toggle with no host/settings-section path, so it can't be triggered from here —
+      // better absent than a dead button. "Switch account" logs out (-> /login, where you
+      // sign in as a different account) via Codex's own local log-out bus; the rest open a
+      // native settings pane via show-settings.
+      item("Account & usage",()=>showSettings("usage"));
+      item("Switch account",()=>logOut());
+      item("Custom instructions",()=>showSettings("personalization"));
+      item("Color theme",()=>showSettings("appearance"));
       const d=document.createElement("div"); d.className="coxMenuSep"; m.appendChild(d);
       item("Copy diagnostics",()=>{ let o={}; try{ o=(window.codexOrbitDump&&window.codexOrbitDump())||{}; }catch(e){} const s=JSON.stringify(o,null,2); try{ navigator.clipboard.writeText(s); }catch(e){ try{ const ta=document.createElement("textarea"); ta.value=s; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }catch(_){} } });
       anchorMenu(m,btn);
@@ -878,7 +897,7 @@ SIDEBAR_IIFE = r"""
       const nativeEls=[...document.querySelectorAll(A.row)];
       const data={
         at:new Date().toISOString(),
-        version:"0.5.33",
+        version:"0.5.36",
         location:{href:location.href,pathname:location.pathname,hash:location.hash,search:location.search},
         hostWorkspace:hostWorkspace(),
         hostChannel:!!(window.__codexOrbitVsApi&&window.__codexOrbitVsApi.postMessage)||(typeof window.__codexPostMessage==="function"),
@@ -1027,6 +1046,29 @@ def assert_codex(ext_dir):
     return m
 
 
+def patch_webview_js(helper) -> bool:
+    """Embed the Orbit build/channel markers into the patched webview chunk.
+
+    TWO jobs, both required by the shared Orbit launcher (pulled from claude-code-orbit):
+    1. MARKER CHECK: the launcher's OTA loader accepts a fetched patcher only if its
+       source contains the literal string `def patch_webview_js`. Without this function
+       the launcher rejects our patcher with "OTA patcher fetch failed" — regardless of
+       the patcher actually working. (The launcher's marker is the Claude patcher's
+       function name; our real injector is copy_patched_assets, so we add this too.)
+    2. INSTALLED TAG: append `var ccPatchBuildVersion="<v>";var ccPatchChannel="<ch>";`
+       so the launcher can read the installed build's version + release channel straight
+       from the patched webview (mirrored into the manifest by archive_patcher.py).
+
+    Appended (never prepended) so it can't disturb the chunk's ES-module import order.
+    Idempotent: no-op if the marker is already present."""
+    text = helper.read_text(encoding="utf-8", errors="ignore")
+    if "ccPatchChannel=" in text:
+        return True
+    marker = f'\n;var ccPatchBuildVersion="{__version__}";var ccPatchChannel="{ORBIT_CHANNEL}";'
+    helper.write_text(text + marker, encoding="utf-8", newline="")
+    return True
+
+
 def copy_patched_assets(extension_dir, patcher_version):
     """The whole patch: append the Codex Orbit sidebar IIFE to a webview entry chunk
     IN PLACE. Keep the name copy_patched_assets — the Orbit wrapper's OTA loader
@@ -1070,7 +1112,8 @@ def copy_patched_assets(extension_dir, patcher_version):
     if "__codexOrbitSidebarV4" not in text:
         text += "\n" + SIDEBAR_IIFE
         helper.write_text(text, encoding="utf-8", newline="")
-    log(f"Injected Codex Orbit sidebar into {helper.name}")
+    patch_webview_js(helper)   # embed ccPatchChannel/build markers + satisfy the OTA marker check
+    log(f"Injected Codex Orbit sidebar into {helper.name} (channel {ORBIT_CHANNEL})")
     marker = {"tool": "Codex Orbit", "patcherVersion": patcher_version, "target": DEFAULT_MARKETPLACE_ITEM,
               "targetVersion": json.loads((ext / 'package.json').read_text(encoding='utf-8')).get('version'),
               "patchedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "mode": "sidebar-only"}

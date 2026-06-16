@@ -15,6 +15,7 @@ recorded Codex version, so every pick is a known-good (patcher, Codex) pair.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PATCHER = ROOT / "stable" / "patch_codex.py"           # the live dynamic patcher
 PATCHER_VERSION_SRC = ROOT / "patcher_version.txt"
+RELEASE_CHANNEL_SRC = ROOT / "release_channel.txt"
 STABLE_VERSION_SRC = ROOT / "stable" / "stable_version.txt"
 PATCHERS_DIR = ROOT / "patchers"
 MANIFEST = PATCHERS_DIR / "manifest.json"
@@ -36,6 +38,34 @@ def read_version(path: Path, label: str) -> str:
     if not v:
         raise SystemExit(f"{label} is empty: {path}")
     return v
+
+
+def read_patcher_channel() -> "str | None":
+    """The channel embedded in the patcher's own ORBIT_CHANNEL constant — the single
+    source of truth for the tag (also embedded into the patched webview as ccPatchChannel).
+    Returns 'experimental'/'stable' or None when the marker is absent."""
+    try:
+        src = PATCHER.read_text(encoding="utf-8")
+        m = re.search(r'^ORBIT_CHANNEL:\s*str\s*=\s*"([^"]+)"', src, flags=re.M)
+        if m:
+            c = m.group(1).strip().lower()
+            if c in ("experimental", "stable"):
+                return c
+    except Exception:
+        pass
+    return None
+
+
+def read_release_channel_file() -> "str | None":
+    """Back-compat fallback: the old side-file tag, used only if the patcher lacks ORBIT_CHANNEL."""
+    try:
+        if RELEASE_CHANNEL_SRC.exists():
+            c = RELEASE_CHANNEL_SRC.read_text(encoding="utf-8").strip().lower()
+            if c in ("experimental", "stable"):
+                return c
+    except Exception:
+        pass
+    return None
 
 
 def current_build_number() -> "int | None":
@@ -70,6 +100,10 @@ def archive_current(verbose: bool = True, build_number: "int | None" = None) -> 
         raise SystemExit(f"Patcher not found: {PATCHER}")
     version = read_version(PATCHER_VERSION_SRC, "patcher_version.txt")
     codex = read_version(STABLE_VERSION_SRC, "stable/stable_version.txt")
+    # Channel ships INSIDE the patcher (ORBIT_CHANNEL) — single source of truth, also
+    # embedded into the patched webview as ccPatchChannel. The manifest entry mirrors it
+    # for fast listing. Fall back to release_channel.txt, then the default (experimental).
+    channel = read_patcher_channel() or read_release_channel_file() or "experimental"
 
     PATCHERS_DIR.mkdir(exist_ok=True)
     dest_name = f"patch_codex-{version}.py"
@@ -78,8 +112,13 @@ def archive_current(verbose: bool = True, build_number: "int | None" = None) -> 
     manifest = load_manifest()
     entry = {
         "version": version,
+        "channel": channel,
         "build": build_number if build_number is not None else current_build_number(),
         "codex": codex,
+        # `claude` mirrors `codex` because the shared Orbit launcher reads the certified
+        # version from entry.claude (Claude-named upstream); keep both so the launcher's
+        # "certified against vX" display works for Codex too.
+        "claude": codex,
         "file": dest_name,
         "date": datetime.now().strftime("%Y-%m-%d"),
     }

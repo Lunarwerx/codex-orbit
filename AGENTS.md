@@ -60,3 +60,66 @@ NEVER hand-prune `patchers/` or the manifest. Bumping the patcher version withou
 running `build.py` would skip the archive — always build so the snapshot happens.
 This is the CCO model; it is the user's #1 requirement: every previous version
 stays installable so a bad push is always one click from recovery.
+
+(Exception, on Jacob's explicit word: a one-time registry RESET when adopting a new
+launcher contract — e.g. 2026-06-16, when the new launcher required channel tags +
+the `patch_webview_js` marker, so all pre-channel patchers were cleared and the
+registry restarted at the first channel-tagged version. Git history retains the old
+snapshots. This is NOT routine pruning — only when Jacob says so.)
+
+## Releases default to EXPERIMENTAL (Jacob's standing rule)
+
+Every release pushed from this repo is **experimental by default**. Unless Jacob
+says the word **"stable"** for that specific release, it ships experimental — no
+exceptions, and don't ask which channel. Red EXPERIMENTAL = "maybe I won't update";
+green STABLE = "cool, I'll update." This lets Jacob push potentially-broken
+experimental builds freely — other users see the red tag and hold off.
+
+The tag ships **inside the patcher itself** — the single source of truth is the
+**`ORBIT_CHANNEL`** constant in `stable/patch_codex.py`
+(`ORBIT_CHANNEL: str = "experimental"`). On patch, `patch_webview_js` embeds it into
+the patched webview as **`ccPatchChannel`**; on build, `tools/archive_patcher.py`
+mirrors it into each `patchers/manifest.json` entry's `channel` field. So the wrapper
+reads the **installed** tag from the patched webview and the **list/available** tag
+from the patcher-sourced manifest — nothing is defaulted. `release_channel.txt` is
+still written for back-compat with already-installed wrappers, but the patcher is the
+source of truth. Each archived patcher carries its own embedded tag, so older
+versions keep their real tag forever — no backfills.
+
+## "Push an update" = `python tools/ship.py` (one command)
+
+When Jacob says **"push an update"**, the prep is a single script — never hand-feed
+the Codex version again:
+
+```
+python tools/ship.py            # experimental (default)
+python tools/ship.py --stable   # stable — ONLY when Jacob says "stable"
+```
+
+It stamps the channel into `stable/patch_codex.py`, re-certifies against the
+**newest Codex** from the Marketplace (writes `stable_version.txt` to that version —
+never a hand-typed one), writes `release_channel.txt`, and runs `build.py` (which
+archives the patcher into the rollback registry WITH its channel, then builds the
+wrapper VSIX). Then commit + push the printed file list and **confirm the raw CDN
+serves the new patcher CODE before telling anyone it's ready** — the launcher's OTA
+reads `stable/patch_codex.py` straight from `main`.
+
+Two rails, both infallible: every release certifies against whatever Codex is
+**newest at ship time**; every release is **tagged** (default experimental, stable
+ONLY on Jacob's word). The only two tags are experimental and stable.
+
+## The launcher is shared — its markers are our patcher's contract
+
+The wrapper/launcher (install / update / previous-versions + the red/green channel
+tags) is pulled from `Lunarwerx/claude-code-orbit` and rebranded at build (see the
+top of this file + CLAUDE.md). It hardcodes a few Claude-named markers our patcher
+MUST satisfy or OTA breaks:
+- It accepts a fetched OTA patcher only if the file contains `def patch_webview_js`
+  (keep that function in `stable/patch_codex.py` — it also embeds `ccPatchChannel`).
+- It reads the certified version from each manifest entry's `claude` field, so
+  `archive_patcher.py` mirrors our `codex` version into a `claude` field too.
+
+If the channel UI or these markers need to change, request it **upstream** — do NOT
+edit the launcher here. (Known upstream gap: the installed-tag reader looks at
+`webview/index.js`, a Claude path Codex doesn't have, so the installed tag falls
+back to the manifest/default; the available/list tag works.)
