@@ -28,6 +28,15 @@
       "claude": "26.5609.30741",
       "file": "patch_codex-0.5.38.py",
       "date": "2026-06-16"
+    },
+    {
+      "version": "0.5.39",
+      "channel": "experimental",
+      "build": 57,
+      "codex": "26.5609.30741",
+      "claude": "26.5609.30741",
+      "file": "patch_codex-0.5.39.py",
+      "date": "2026-06-16"
     }
   ]
 }
