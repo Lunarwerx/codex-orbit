@@ -27,8 +27,25 @@ python build.py
 ```
 
 That creates `builds/codex-orbit-build-<N>.vsix`, updates
-`latest/codex-orbit.vsix`, writes `wrapper_version.txt`, and appends to
+`latest/codex-orbit.vsix`, writes `wrapper_version.txt`, archives the current
+patcher into `patchers/` (with its `ORBIT_CHANNEL` tag), and appends to
 `builds/BUILD_LOG.md`.
+
+## Cut a release (channel-aware): `python tools/ship.py`
+
+For an actual release, prefer `ship.py` over a bare `build.py` — it stamps the
+release channel and certifies against the newest Codex in one step:
+
+```powershell
+python tools/ship.py            # experimental (DEFAULT — Jacob's standing rule)
+python tools/ship.py --stable   # stable — ONLY when Jacob explicitly says "stable"
+python tools/ship.py --no-certify   # channel-stamp + build only (skip newest-Codex re-certify)
+```
+
+It stamps `ORBIT_CHANNEL` in `stable/patch_codex.py`, writes `release_channel.txt`,
+re-certifies (writes `stable_version.txt`), and runs `build.py`. Then commit + push
+the printed file list and confirm the CDN serves the new patcher code. See
+`AGENTS.md` § "Releases default to EXPERIMENTAL" for the full channel rule.
 
 ## Verify A Baseline
 
