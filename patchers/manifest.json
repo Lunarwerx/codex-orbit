@@ -86,7 +86,7 @@
     {
       "version": "0.5.45",
       "channel": "experimental",
-      "build": 64,
+      "build": 65,
       "codex": "26.5609.30741",
       "claude": "26.5609.30741",
       "file": "patch_codex-0.5.45.py",
