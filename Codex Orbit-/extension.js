@@ -80,6 +80,10 @@ const GS_LAST_NOTIFIED_CLAUDE = "codexOrbit.lastNotifiedClaudeVersion";
 // the synchronous detectState() can offer "Use previous version" with no network.
 const GS_PATCHER_MANIFEST = "codexOrbit.patcherManifest";
 const GS_DISABLED_PATCHES = "codexOrbit.disabledPatches";
+// User opt-in: when true, untested (experimental) releases are not surfaced as
+// updates — the red banner, the status-bar badge, and "Check for updates" only
+// flag STABLE releases. Default false (untested visible, matching the red tag).
+const GS_HIDE_UNTESTED = "codexOrbit.hideUntested";
 
 const REAPER_DEFAULT_MIN_AGE_MINUTES = 6;
 const REAPER_DEFAULT_INTERVAL_MINUTES = 3;
@@ -143,6 +147,10 @@ function activate(context) {
   );
 
   startClaudeZombieReaper(context);
+
+  // Hand the status bar item to the provider so opening the panel can trigger a
+  // fresh check (provider.autoCheck) instead of waiting for the 4-hour poll.
+  provider.statusBarItem = statusBarItem;
 
   // --- Background patcher-version polling ---
   startBackgroundPolling(context, provider, statusBarItem);
@@ -590,80 +598,23 @@ function patcherHistoryFromManifest(manifest) {
     .map((p) => ({ version: p.version, claude: p.claude, build: (p.build != null ? p.build : null), channel: (p.channel || null) }));
 }
 
-function readInstalledPatchInfo() {
-  try {
-    const ext = vscode.extensions.getExtension(STOCK_ID);
-    if (!ext) return null;
-    const root = ext.extensionUri.fsPath;
-    let marker = null;
-    try {
-      const markerPath = path.join(root, "codex-orbit-patch.json");
-      if (fs.existsSync(markerPath)) marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    } catch (_) {
-      marker = null;
-    }
-
-    const files = [];
-    const legacy = path.join(root, "webview", "index.js");
-    if (fs.existsSync(legacy)) files.push(legacy);
-    const assets = path.join(root, "webview", "assets");
-    if (fs.existsSync(assets)) {
-      try {
-        const names = fs.readdirSync(assets)
-          .filter((name) => /\.js$/i.test(name) && !/\.map$/i.test(name))
-          .sort((a, b) => {
-            const aa = a.startsWith("app-main-") ? 0 : 1;
-            const bb = b.startsWith("app-main-") ? 0 : 1;
-            return aa - bb || a.localeCompare(b);
-          });
-        for (const name of names) files.push(path.join(assets, name));
-      } catch (_) {}
-    }
-
-    let buildVersion = null;
-    let channel = null;
-    let hasOrbitCode = false;
-    for (const file of files) {
-      let text = "";
-      try { text = fs.readFileSync(file, "utf8"); } catch (_) { continue; }
-      if (!buildVersion) {
-        const m = text.match(/ccPatchBuildVersion\s*=\s*["']([^"']+)["']/);
-        if (m) buildVersion = m[1];
-      }
-      if (!channel) {
-        const m = text.match(/ccPatchChannel\s*=\s*["']([^"']+)["']/);
-        const c = m ? m[1].trim().toLowerCase() : null;
-        if (c === "experimental" || c === "stable") channel = c;
-      }
-      if (!hasOrbitCode && (text.includes("__codexOrbitSidebarV4") || text.includes("codexOrbitDump") || text.includes("ccPatchBuildVersion"))) {
-        hasOrbitCode = true;
-      }
-      if (buildVersion && channel && hasOrbitCode) break;
-    }
-
-    const markerVersion = marker && (marker.patcherVersion || marker.version || null);
-    if (!markerVersion && !buildVersion && !hasOrbitCode) return null;
-    return {
-      patched: true,
-      version: buildVersion || markerVersion || null,
-      channel,
-      targetVersion: marker && (marker.targetVersion || marker.claude || marker.codex || null),
-      marker,
-      hasOrbitCode,
-    };
-  } catch (_) {
-    return null;
-  }
-}
-
 /**
  * Read the currently-installed patcher version from the patched Codex
  * webview. Returns the version string or null if Codex isn't installed
  * or isn't patched.
  */
 function readInstalledPatcherVersion() {
-  const info = readInstalledPatchInfo();
-  return info ? info.version : null;
+  try {
+    const ext = vscode.extensions.getExtension(STOCK_ID);
+    if (!ext) return null;
+    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
+    if (!fs.existsSync(jsPath)) return null;
+    const text = fs.readFileSync(jsPath, "utf8");
+    const m = text.match(/ccPatchBuildVersion="([^"]+)"/);
+    return m ? m[1] : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /**
@@ -675,8 +626,18 @@ function readInstalledPatcherVersion() {
  * "stable" | null (null only for a pre-channel patched build, pre-1.2.86).
  */
 function readInstalledPatcherChannel() {
-  const info = readInstalledPatchInfo();
-  return info ? info.channel : null;
+  try {
+    const ext = vscode.extensions.getExtension(STOCK_ID);
+    if (!ext) return null;
+    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
+    if (!fs.existsSync(jsPath)) return null;
+    const text = fs.readFileSync(jsPath, "utf8");
+    const m = text.match(/ccPatchChannel="([^"]+)"/);
+    const c = m ? m[1].trim().toLowerCase() : null;
+    return (c === "experimental" || c === "stable") ? c : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function readBundledWrapperVersion(context) {
@@ -837,16 +798,32 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
     // making its own network call (detectState is synchronous).
     await context.globalState.update(GS_REMOTE_PATCHER_VERSION, remoteVersion);
 
-    // Cache the release channel (experimental/stable) the same way, so the
-    // sidebar hero can tag the available update synchronously.
-    try { await context.globalState.update(GS_RELEASE_CHANNEL, await fetchReleaseChannel()); } catch (_) {}
+    // Resolve the channel (experimental/stable) of the AVAILABLE update. The
+    // patcher embeds its own ORBIT_CHANNEL, mirrored per-version into the
+    // manifest at ship time, so prefer the manifest entry for the EXACT remote
+    // version; fall back to release_channel.txt (the latest push's tag). Defaults
+    // to experimental on anything unreachable so an unknown build never falsely
+    // notifies. Cached so the sidebar hero can tag the update synchronously AND
+    // so the notification below can fire ONLY for stable.
+    let releaseChannel = "experimental";
+    try { releaseChannel = await fetchReleaseChannel(); } catch (_) {}
 
     // Cache the rollback registry too, so detectState() can offer "Use previous
-    // version" with no network call. Silent on failure — rollback is optional.
+    // version" with no network call. Silent on failure -- rollback is optional.
+    let patcherManifest = null;
     try {
-      const manifest = await fetchPatcherManifest();
-      if (manifest) await context.globalState.update(GS_PATCHER_MANIFEST, manifest);
+      patcherManifest = await fetchPatcherManifest();
+      if (patcherManifest) await context.globalState.update(GS_PATCHER_MANIFEST, patcherManifest);
     } catch (_) {}
+
+    // Prefer the manifest's per-version channel for the exact remote version
+    // (the patcher-sourced truth) over release_channel.txt.
+    try {
+      const entry = patcherManifest && Array.isArray(patcherManifest.patchers)
+        ? patcherManifest.patchers.find((p) => p && p.version === remoteVersion) : null;
+      if (entry && (entry.channel === "stable" || entry.channel === "experimental")) releaseChannel = entry.channel;
+    } catch (_) {}
+    try { await context.globalState.update(GS_RELEASE_CHANNEL, releaseChannel); } catch (_) {}
 
     // Also cache the newest Codex on the Marketplace, so detectState() and
     // the "Check updates" button can flag "a newer Codex exists — re-patch"
@@ -873,25 +850,35 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
     const claudeCodeVersion = readInstalledClaudeVersion();
     const claudeOutdated = !!claudeCodeVersion && !!latestClaude && cmpVer(claudeCodeVersion, latestClaude) < 0;
 
-    if (cmpVer(installedVersion, remoteVersion) < 0) {
+    // "Hide untested updates" opt-in: when on, an experimental release doesn't
+    // flip the status-bar badge either (the hero is gated in detectState, and the
+    // stable-only toast already won't fire). Treat it as up-to-date for the badge.
+    const hideUntested = !!context.globalState.get(GS_HIDE_UNTESTED);
+    const suppressUntested = hideUntested && releaseChannel !== "stable";
+
+    if (!suppressUntested && cmpVer(installedVersion, remoteVersion) < 0) {
       // --- Update available ---
       statusBarItem.text = "$(cloud-download) Orbit Update";
       statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
       statusBarItem.show();
 
-      // Only notify once per version (dedup via globalState).
+      // Notify once per version (dedup via globalState) -- but ONLY for STABLE
+      // releases. Experimental pushes still flip the badge above and the sidebar
+      // hero (red tag) so anyone who wants the bleeding edge can pull it, but they
+      // never interrupt with a toast. This lets experimental ship freely without
+      // bothering anyone; only "stable" pushes actively notify.
       const lastNotified = context.globalState.get(GS_LAST_NOTIFIED_VERSION);
-      if (lastNotified !== remoteVersion) {
+      if (releaseChannel === "stable" && lastNotified !== remoteVersion) {
         await context.globalState.update(GS_LAST_NOTIFIED_VERSION, remoteVersion);
         const action = await vscode.window.showInformationMessage(
-          `Codex Orbit: Experimental patcher v${remoteVersion} is available (you have v${installedVersion}). Update now?`,
+          `Codex Orbit: Stable patcher v${remoteVersion} is available (you have v${installedVersion}). Update now?`,
           "Update", "Later"
         );
         if (action === "Update") {
           provider.triggerEnable();
         }
       }
-    } else if (claudeOutdated) {
+    } else if (!suppressUntested && claudeOutdated) {
       // --- Patcher is current, but a newer Codex shipped. Re-patching
       //     pulls the newest Claude and re-applies the same experimental patcher. ---
       statusBarItem.text = "$(cloud-download) Orbit Update";
@@ -954,6 +941,8 @@ class SidebarProvider {
     this.context = context;
     this.view = null;
     this.busy = false;
+    this.statusBarItem = null;   // set in activate() so autoCheck() can run the poller
+    this._lastAutoCheck = 0;
   }
 
   resolveWebviewView(view) {
@@ -961,8 +950,24 @@ class SidebarProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
     view.webview.html = this.renderHTML();
     view.webview.onDidReceiveMessage((msg) => this.onMessage(msg));
-    view.onDidChangeVisibility(() => { if (view.visible) this.pushState(); });
+    view.onDidChangeVisibility(() => { if (view.visible) { this.pushState(); this.autoCheck(); } });
     this.pushState();
+    this.autoCheck();
+  }
+
+  // Fire a fresh background update check whenever the panel opens or refocuses, so
+  // a newly-published applicable update surfaces its "Install newest" button
+  // automatically — no manual "Check for updates" needed. checkForPatcherUpdate()
+  // caches the result and calls pushState() when done. Throttled to once a minute
+  // so flipping between views doesn't hammer GitHub.
+  autoCheck() {
+    try {
+      if (!this.statusBarItem || this.busy) return;
+      const now = Date.now();
+      if (now - (this._lastAutoCheck || 0) < 60 * 1000) return;
+      this._lastAutoCheck = now;
+      checkForPatcherUpdate(this.context, this, this.statusBarItem);
+    } catch (_) {}
   }
 
   send(type, payload) {
@@ -1006,6 +1011,15 @@ class SidebarProvider {
       const ids = Array.isArray(msg.ids) ? msg.ids.filter((x) => typeof x === "string") : [];
       await this.context.globalState.update(GS_DISABLED_PATCHES, ids);
       this.log("Patch selection saved (left out: " + (ids.join(", ") || "none") + ")");
+      return;
+    }
+    if (msg.type === "setHideUntested") {
+      await this.context.globalState.update(GS_HIDE_UNTESTED, !!msg.value);
+      this.log("Hide untested updates: " + (msg.value ? "ON (only stable releases shown)" : "OFF"));
+      // Re-evaluate the hero immediately so an experimental update banner appears
+      // or disappears the moment the toggle flips (the status-bar badge follows on
+      // the next background poll).
+      this.pushState();
       return;
     }
     if (msg.type === "cancel") {
@@ -1083,11 +1097,11 @@ class SidebarProvider {
             } else if (!installedVersion) {
               updateAvailable = true;
               resultMsg = "Codex is not patched yet.";
-              resultSub = "GitHub experimental patcher is v" + remoteVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install experimental now?";
+              resultSub = "GitHub untested patcher is v" + remoteVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install untested now?";
             } else if (cmpVer(installedVersion, remoteVersion) < 0) {
               updateAvailable = true;
-              resultMsg = "Experimental patcher v" + remoteVersion + " is available.";
-              resultSub = "Installed Codex has patcher v" + installedVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install experimental now?";
+              resultMsg = "Untested patcher v" + remoteVersion + " is available.";
+              resultSub = "Installed Codex has patcher v" + installedVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install untested now?";
             } else if (claudeOutdated) {
               updateAvailable = true;
               updateAction = "enable";
@@ -1136,6 +1150,28 @@ class SidebarProvider {
                 "<span class=\"subNote\">" + foot + "</span>";
 
               resultSub = "Patched and current — Codex v" + (claudeCodeVersion || "?") + ", Orbit patch tool #" + patchNum + (certified ? " (built for v" + certified + ")" : "") + ", Orbit app v" + wrapperVersion + ".";
+            }
+            // "Hide untested updates" — when on, an experimental release is not
+            // offered through manual Check either (only stable surfaces). Only
+            // gate genuine updates to an already-installed patch, never the
+            // first-time install.
+            if (updateAvailable && installedVersion && releaseChannel !== "stable"
+                && this.context.globalState.get(GS_HIDE_UNTESTED)) {
+              // Count the untested releases newer than the installed patcher that
+              // are being held back, so the message says HOW MANY are waiting (not
+              // just "an update exists"). At least 1 — we already found remoteVersion.
+              var ccHidden = (patcherHistoryFromManifest(getEffectiveManifest(this.context)) || []).filter(function (v) {
+                return v && v.version && v.channel !== "stable" && cmpVer(v.version, installedVersion) > 0;
+              }).length;
+              if (ccHidden < 1) ccHidden = 1;
+              updateAvailable = false;
+              updateAction = "enable";
+              resultMsg = "No stable updates — " + ccHidden + " untested update" + (ccHidden === 1 ? "" : "s") + " hidden.";
+              resultSub = (ccHidden === 1
+                ? "An untested release (v" + remoteVersion + ") is available but held back by "
+                : ccHidden + " untested releases (newest v" + remoteVersion + ") are available but held back by ")
+                + "“Hide untested updates” in the gear menu. Turn it off to install " + (ccHidden === 1 ? "it." : "them.");
+              resultSubHtml = "";
             }
           } catch (err) {
             this.send("phase", {
@@ -1421,7 +1457,7 @@ html,body{height:100%;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;
   color:var(--vscode-foreground);background:transparent;overflow:hidden}
 .wrap{display:flex;flex-direction:column;height:100%;padding:28px 22px 18px;
-  overflow:auto}
+  overflow:hidden}
 .hero{display:flex;flex-direction:column;align-items:center;text-align:center;
   margin-bottom:26px;flex-shrink:0}
 .logo{width:48px;height:48px;margin-bottom:14px;
@@ -1430,7 +1466,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   text-transform:uppercase;line-height:1.2}
 .subtitle{margin:6px 0 0;font-size:10px;opacity:.5;text-transform:uppercase;
   letter-spacing:.18em;font-weight:500}
-.card{flex:1;display:flex;flex-direction:column;justify-content:flex-start;
+/* flex:1 0 auto — card GROWS to fill a tall panel (unchanged look) but never
+   SHRINKS below its own content. Without this the card shrank when the panel was
+   dragged short and its content spilled down onto .recommended (the cards visibly
+   overlapped). Now .recommended yields + scrolls instead, so they never stack. */
+.card{flex:1 0 auto;display:flex;flex-direction:column;justify-content:flex-start;
   min-height:0}
 .statePane{display:none;flex-direction:column;animation:fadeIn .25s ease}
 .statePane.active{display:flex}
@@ -1474,12 +1514,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .btn[hidden],.status[hidden]{display:none}
 .btn svg{width:14px;height:14px;flex-shrink:0}
 
-/* Alt-action: small text link styled like "Previous versions" */
-.altAction{display:block;margin:6px auto 0;background:none;border:0;cursor:pointer;
-  font-size:11px;opacity:.55;color:inherit;padding:6px 10px;text-decoration:underline;
-  text-underline-offset:2px;text-align:center;font-family:inherit;width:100%}
-.altAction:hover{opacity:.9}
-.altAction[hidden]{display:none}
 
 .hint{font-size:11px;opacity:.55;line-height:1.55;margin-top:14px;text-align:center}
 .hint code{font-size:10.5px;opacity:.85;background:rgba(127,127,127,.12);
@@ -1605,8 +1639,54 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 /* recommended extensions block — grows to fill the panel's free space (the
    patched state has little else to show, so the ads get the real estate) and
    centers its enlarged cards vertically between the buttons and the footer. */
-.recommended{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;
-  padding-top:22px;min-height:0}
+.recommended{flex:1 1 auto;display:flex;flex-direction:column;justify-content:flex-start;
+  padding-top:22px;min-height:0;overflow-y:auto}
+.orbitGear{position:fixed;top:10px;right:10px;z-index:40;width:30px;height:30px;padding:0;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  background:rgba(127,127,127,.12);border:1px solid rgba(127,127,127,.22);border-radius:7px;
+  color:var(--vscode-foreground);opacity:.85;transition:opacity .12s,background .12s}
+.orbitGear:hover{opacity:1;background:rgba(127,127,127,.22)}
+.orbitGear[hidden]{display:none}
+.orbitGearMenu{position:fixed;top:46px;right:10px;z-index:39;width:240px;max-height:78vh;
+  overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:12px;
+  background:var(--vscode-menu-background,var(--vscode-editorWidget-background,#252526));
+  border:1px solid var(--vscode-menu-border,rgba(127,127,127,.3));border-radius:10px;
+  box-shadow:0 8px 28px rgba(0,0,0,.42)}
+.orbitGearMenu[hidden]{display:none}
+.orbitGear svg{width:17px;height:17px}
+/* Inside the gear menu every row is the same .btn block, left-aligned like a
+   settings menu; the menu's own gap handles spacing, so drop the stacking margin. */
+.orbitGearMenu .btn{margin-bottom:0;justify-content:flex-start;text-align:left}
+.orbitGearMenu .patchPickerBody{padding:2px 2px 0}
+/* Patches behaves like the other buttons but pushes its chevron to the edge. */
+.patchBtn .lbl{flex:1;text-align:left}
+.patchBtn.open .patchChevron{transform:rotate(90deg)}
+/* "Hide untested updates" — a settings toggle styled to sit among the buttons. */
+.gearToggle{display:flex;align-items:flex-start;gap:9px;width:100%;padding:9px 12px;
+  border:1px solid rgba(127,127,127,.16);border-radius:7px;cursor:pointer;
+  background:rgba(127,127,127,.05);transition:background .14s ease}
+.gearToggle:hover{background:rgba(127,127,127,.12)}
+.gearToggle input{margin-top:2px;flex-shrink:0;cursor:pointer;
+  accent-color:var(--vscode-button-background,#3794ff)}
+.gearToggleText{display:flex;flex-direction:column;gap:1px;font-size:13px;font-weight:500;
+  line-height:1.2;text-align:left}
+.gearToggleSub{font-size:10.5px;opacity:.5;font-weight:400}
+.btn.danger{background:rgba(229,72,77,.16);color:#ff6b6b;border-color:rgba(229,72,77,.45)}
+.btn.danger:hover{background:rgba(229,72,77,.28)}
+/* Remove-Orbit confirmation modal — a real centered popup over a dimmed
+   backdrop, replacing the old inline slide-down inside the gear menu. */
+.modalOverlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
+  justify-content:center;padding:20px;background:rgba(0,0,0,.55);animation:fadeIn .14s ease}
+.modalOverlay[hidden]{display:none}
+.modalBox{width:min(330px,100%);padding:22px 22px 16px;border-radius:12px;text-align:center;
+  background:var(--vscode-menu-background,var(--vscode-editorWidget-background,#252526));
+  border:1px solid var(--vscode-menu-border,rgba(127,127,127,.3));
+  box-shadow:0 16px 44px rgba(0,0,0,.55);animation:modalPop .18s cubic-bezier(.2,.8,.3,1)}
+@keyframes modalPop{from{opacity:0;transform:scale(.94) translateY(8px)}to{opacity:1;transform:none}}
+.modalTitle{margin:0 0 9px;font-size:15px;font-weight:600}
+.modalText{margin:0 0 18px;font-size:12.5px;opacity:.68;line-height:1.5}
+.modalBtns{display:flex;gap:10px}
+.modalBtns .btn{flex:1;margin-bottom:0;justify-content:center}
 .recHeader{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
   opacity:.5;text-align:center;margin:0 0 14px}
 .recHeaderCompany{margin-top:20px}
@@ -1617,13 +1697,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   font:inherit;transition:background .12s ease,border-color .12s ease,transform .08s ease}
 .recItem:hover{background:rgba(127,127,127,.12);border-color:rgba(127,127,127,.28)}
 .recItem:active{transform:translateY(1px)}
-.patchPicker{margin-top:14px;border-top:1px solid rgba(127,127,127,.18);padding-top:10px;text-align:left}
-.patchPickerHeader{appearance:none;border:0;background:none;color:var(--vscode-foreground);
-  display:flex;align-items:center;gap:6px;width:100%;cursor:pointer;
-  font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;opacity:.7;padding:2px 0}
-.patchPickerHeader:hover{opacity:1}
 .patchChevron{transition:transform .15s ease;display:inline-block}
-.patchPickerHeader.open .patchChevron{transform:rotate(90deg)}
 .patchPickerNote{font-size:10.5px;opacity:.5;margin:6px 0 8px}
 .patchRow{display:flex;align-items:flex-start;gap:9px;padding:6px 4px;border-radius:7px;cursor:pointer}
 .patchRow:hover{background:rgba(127,127,127,.10)}
@@ -1641,11 +1715,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recArrow{opacity:.4;font-size:18px;line-height:1;flex-shrink:0}
 
-/* footer: subtle "show details" + brand */
+/* footer: brand only */
 .footer{padding-top:14px;text-align:center;flex-shrink:0}
-.detailsToggle{display:inline-block;font-size:10.5px;opacity:.4;cursor:pointer;
-  user-select:none;padding:4px 8px}
-.detailsToggle:hover{opacity:.7}
 .brand{font-size:10px;opacity:.32;margin-top:6px;letter-spacing:.06em}
 .log{display:none;font-family:ui-monospace,Consolas,monospace;font-size:10.5px;
   opacity:.7;background:rgba(0,0,0,.22);border-radius:5px;padding:8px 10px;
@@ -1659,6 +1730,43 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
     <img class="logo" id="logo" src="${logo}" alt=""/>
     <div class="title">Codex Orbit</div>
     <div class="subtitle">Patch Companion</div>
+  </div>
+
+  <button class="orbitGear" id="orbitGear" type="button" title="Settings" aria-label="Settings" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+  <div class="orbitGearMenu" id="orbitGearMenu" hidden>
+    <button class="btn" id="checkUpdatesBtn" data-action="checkUpdates">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7a5.5 5.5 0 1 1-1.7-3.95"/><polyline points="13,1 13,4.2 9.8,4.2"/></svg>
+      Check for updates
+    </button>
+    <label class="gearToggle" id="hideUntestedRow"
+           title="When on, the red 'update available' banner and update prompts only appear for STABLE releases. Untested (experimental) releases stay hidden until you turn this off.">
+      <input type="checkbox" id="hideUntestedChk"/>
+      <span class="gearToggleText">Hide untested updates
+        <span class="gearToggleSub">Only show stable releases</span>
+      </span>
+    </label>
+    <button class="btn" id="versionsBtn" hidden
+            title="Pick an earlier version to install — handy if the newest one misbehaves. Each shows the Codex it's built for and its build number.">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7a5 5 0 1 0 1.5-3.6"/><polyline points="1.4,1.6 1.4,4.2 4,4.2"/><path d="M7 4.3V7l1.9 1.1"/></svg>
+      <span class="lbl" id="versionsBtnLabel">Previous versions</span>
+    </button>
+    <button class="btn patchBtn" id="patchPickerHeader" type="button"
+            title="Choose which Orbit patches get applied">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h6"/><path d="M2 9.5h4"/><circle cx="10" cy="4.5" r="1.6"/><circle cx="8" cy="9.5" r="1.6"/></svg>
+      <span class="lbl">Patches</span>
+      <span class="patchChevron">›</span>
+    </button>
+    <div class="patchPickerBody" id="patchPickerBody" hidden>
+      <p class="patchPickerNote">Uncheck to leave a patch out — applies the next time you Install / Update.</p>
+      ${patchTogglesHtml}
+    </div>
+    <button class="btn" id="disableBtn" type="button"
+            title="Uninstall Orbit and restore the original, unpatched Codex.">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h8M5.5 4V2.8h3V4M5 4l.4 7.2h3.2L9 4"/></svg>
+      Remove Orbit
+    </button>
   </div>
 
   <div class="card">
@@ -1682,30 +1790,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
         <span class="btnIcon" id="enableBtnIcon"></span>
         <span class="btnLabel" id="enableBtnLabel">Install newest</span>
       </button>
-      <button class="btn" id="disableBtn" data-action="disable"
-              title="Uninstall Orbit and restore the original, unpatched Codex.">
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="5"/></svg>
-        Remove Orbit
-      </button>
-      <button class="btn" id="checkUpdatesBtn" data-action="checkUpdates">
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7a5.5 5.5 0 1 1-1.7-3.95"/><polyline points="13,1 13,4.2 9.8,4.2"/></svg>
-        Check for updates
-      </button>
-      <button class="altAction" id="versionsBtn" hidden
-              title="Pick an earlier version to install — handy if the newest one misbehaves. Each shows the Codex it's built for and its build number.">
-        Previous versions
-      </button>
       <div class="hint" id="idleHint"></div>
-      <div class="patchPicker" id="patchPicker">
-        <button class="patchPickerHeader" id="patchPickerHeader" type="button"
-                title="Choose which Orbit patches get applied">
-          <span>Patches</span><span class="patchChevron">›</span>
-        </button>
-        <div class="patchPickerBody" id="patchPickerBody" hidden>
-          <p class="patchPickerNote">Uncheck to leave a patch out — applies the next time you Install / Update.</p>
-          ${patchTogglesHtml}
-        </div>
-      </div>
     </div>
 
     <!-- WORKING -->
@@ -1767,9 +1852,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
   </div>
 
   <div class="footer">
-    <span class="detailsToggle" id="detailsToggle">Show details</span>
     <pre class="log" id="log"></pre>
     <div class="brand">CLAUDE CODE ORBIT${version ? " v" + version : ""}</div>
+  </div>
+
+  <!-- Remove-Orbit confirmation modal (centered popup, not an inline slide-down) -->
+  <div class="modalOverlay" id="removeModal" hidden>
+    <div class="modalBox" role="dialog" aria-modal="true" aria-labelledby="removeModalTitle">
+      <p class="modalTitle" id="removeModalTitle">Remove Orbit?</p>
+      <p class="modalText">This uninstalls Orbit and restores the original, unpatched Codex.</p>
+      <div class="modalBtns">
+        <button class="btn" id="removeCancelBtn" type="button">Cancel</button>
+        <button class="btn danger" id="removeYesBtn" type="button">Yes, remove</button>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -1793,7 +1889,6 @@ const doneMsgEl = document.getElementById("doneMsg");
 const donePrimaryBtn = document.getElementById("donePrimaryBtn");
 const errorSubEl = document.getElementById("errorSub");
 const logEl = document.getElementById("log");
-const detailsToggle = document.getElementById("detailsToggle");
 const logoEl = document.getElementById("logo");
 const enableBtn = document.getElementById("enableBtn");
 const enableBtnIcon = document.getElementById("enableBtnIcon");
@@ -1808,6 +1903,7 @@ const patchedMeta = document.getElementById("patchedMeta");
 const stockHero = document.getElementById("stockHero");
 const stockSub = document.getElementById("stockSub");
 const versionsBtn = document.getElementById("versionsBtn");
+const versionsBtnLabel = document.getElementById("versionsBtnLabel");
 const verList = document.getElementById("verList");
 const confirmMsgEl = document.getElementById("confirmMsg");
 const confirmSubEl = document.getElementById("confirmSub");
@@ -1852,6 +1948,8 @@ function applyIdleState(state, info) {
   disableBtn.disabled = false;
   enableBtn.hidden = false;
   disableBtn.hidden = false;
+  var ccRemoveModal = document.getElementById("removeModal");
+  if (ccRemoveModal) ccRemoveModal.hidden = true;   // dismiss the confirm modal on any state change
   checkUpdatesBtn.hidden = true;
   statusEl.hidden = false;
   patchedHero.classList.remove("updateAvailable", "experimental", "stable");
@@ -1863,7 +1961,7 @@ function applyIdleState(state, info) {
     statusEl.hidden = true;                // hide redundant pill — hero card says it
     checkUpdatesBtn.hidden = false;
     versionsBtn.hidden = !hasOtherVersions;
-    versionsBtn.textContent = "Previous versions";
+    versionsBtnLabel.textContent = "Previous versions";
     if (claudeUpdateAvailable) {
       // A newer Codex shipped — surface "install newest" right in the hero.
       patchedHero.classList.add("updateAvailable");
@@ -1902,9 +2000,16 @@ function applyIdleState(state, info) {
         patchedMeta.hidden = false;
       }
       enableBtn.hidden = true;               // hide entirely — patched hero already says "enabled"
-      disableBtn.classList.add("primary");
       disableBtn.title = "Uninstall Orbit and restore the original, unpatched Codex.";
-      idleHint.innerHTML = '';
+      // Quiet, non-alarming line when "Hide untested updates" is holding releases
+      // back — so the user knows one is waiting without opening Check for updates.
+      var ccHiddenN = (info && info.hiddenUntestedCount) || 0;
+      if (ccHiddenN > 0) {
+        idleHint.textContent = ccHiddenN + " untested update" + (ccHiddenN === 1 ? "" : "s")
+          + " hidden · turn off “Hide untested updates” to install.";
+      } else {
+        idleHint.innerHTML = '';
+      }
     }
   } else if (state === "outdated") {
     patchedHero.hidden = false;
@@ -1916,7 +2021,10 @@ function applyIdleState(state, info) {
     if (channel) {
       var ccHeroTag = document.createElement("span");
       ccHeroTag.className = "channelTag " + (channel === "stable" ? "stable" : "experimental");
-      ccHeroTag.textContent = channel === "stable" ? "STABLE" : "EXPERIMENTAL";
+      ccHeroTag.textContent = channel === "stable" ? "STABLE" : "UNTESTED";
+      ccHeroTag.title = channel === "stable"
+        ? "Stable — tested and verified for this Codex version."
+        : "Untested — may include new or not-yet-tested features, or simply hasn't been verified against the newest Codex yet.";
       patchedTitle.appendChild(document.createTextNode(" "));
       patchedTitle.appendChild(ccHeroTag);
     }
@@ -1933,7 +2041,7 @@ function applyIdleState(state, info) {
     enableBtn.title = "Download Codex and patch it with the newest patcher (v" + (targetVersion || "?") + ").";
     checkUpdatesBtn.hidden = false;
     versionsBtn.hidden = !hasOtherVersions;
-    versionsBtn.textContent = "Previous versions";
+    versionsBtnLabel.textContent = "Previous versions";
     disableBtn.title = "Uninstall Orbit and restore the original, unpatched Codex.";
     idleHint.innerHTML = '';
   } else if (state === "stock") {
@@ -1947,7 +2055,7 @@ function applyIdleState(state, info) {
     enableBtn.title = "";
     disableBtn.hidden = true;              // hide entirely — nothing to restore
     versionsBtn.hidden = !hasOtherVersions;
-    versionsBtn.textContent = "Install specific version";
+    versionsBtnLabel.textContent = "Install specific version";
     idleHint.innerHTML = 'Install newest downloads <code>openai.chatgpt</code>, pulls the latest patcher, and installs it.';
   } else {
     // "none" — Codex is not installed.  Offer both "Install newest"
@@ -1962,7 +2070,7 @@ function applyIdleState(state, info) {
     disableBtn.hidden = true;
     checkUpdatesBtn.hidden = true;
     versionsBtn.hidden = !hasOtherVersions;
-    versionsBtn.textContent = "Install specific version";
+    versionsBtnLabel.textContent = "Install specific version";
     idleHint.innerHTML = '<b>Install newest</b> downloads <code>openai.chatgpt</code>, pulls the latest patcher, and installs it.<br><b>Install specific version</b> picks an archived patcher + its certified Codex from the registry.';
   }
 }
@@ -1978,7 +2086,10 @@ function ccChannelTag(channel) {
   var c = (channel === "stable") ? "stable" : "experimental";
   var t = document.createElement("span");
   t.className = "channelTag " + c;
-  t.textContent = c === "stable" ? "STABLE" : "EXPERIMENTAL";
+  t.textContent = c === "stable" ? "STABLE" : "UNTESTED";
+  t.title = c === "stable"
+    ? "Stable — tested and verified for this Codex version."
+    : "Untested — may include new or not-yet-tested features, or simply hasn't been verified against the newest Codex yet.";
   return t;
 }
 
@@ -2039,7 +2150,6 @@ versionsBtn.addEventListener("click", function () {
 confirmInstallBtn.addEventListener("click", function () {
   if (!pendingEntry) return;
   logBuf = ""; logEl.textContent = ""; logEl.classList.remove("visible");
-  detailsToggle.textContent = "Show details";
   resetWorkingState();
   setPane("working");
   vscode.postMessage({ type: "action", action: "enablePrevious", version: pendingEntry.version });
@@ -2057,6 +2167,56 @@ function setPane(name) {
   // confirm, working and done panes uncluttered AND stops the (grown) ad block
   // from competing for height and overlapping pane buttons (e.g. Back).
   if (recommendedEl) recommendedEl.style.display = (name === "idle") ? "" : "none";
+  var ccGear = document.getElementById("orbitGear");
+  if (ccGear) ccGear.hidden = (name !== "idle");
+  if (name !== "idle") { var ccGM = document.getElementById("orbitGearMenu"); if (ccGM) ccGM.hidden = true; }
+}
+
+const orbitGearEl = document.getElementById("orbitGear");
+const orbitGearMenuEl = document.getElementById("orbitGearMenu");
+if (orbitGearEl && orbitGearMenuEl) {
+  orbitGearEl.addEventListener("click", (e) => { e.stopPropagation(); orbitGearMenuEl.hidden = !orbitGearMenuEl.hidden; });
+  orbitGearMenuEl.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", () => { if (!orbitGearMenuEl.hidden) orbitGearMenuEl.hidden = true; });
+}
+
+// Remove Orbit → a centered confirmation MODAL (not the old inline slide-down).
+// The uninstall only runs on an explicit "Yes, remove"; Cancel, a backdrop click,
+// or Escape all dismiss it.
+const removeModalEl = document.getElementById("removeModal");
+const removeYesBtn = document.getElementById("removeYesBtn");
+const removeCancelBtn = document.getElementById("removeCancelBtn");
+function closeRemoveModal() { if (removeModalEl) removeModalEl.hidden = true; }
+if (disableBtn && removeModalEl) {
+  disableBtn.addEventListener("click", () => {
+    if (disableBtn.disabled) return;
+    if (orbitGearMenuEl) orbitGearMenuEl.hidden = true;  // close the gear menu behind it
+    removeModalEl.hidden = false;
+  });
+}
+if (removeCancelBtn) removeCancelBtn.addEventListener("click", closeRemoveModal);
+if (removeModalEl) {
+  removeModalEl.addEventListener("click", (e) => { if (e.target === removeModalEl) closeRemoveModal(); });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && removeModalEl && !removeModalEl.hidden) closeRemoveModal();
+});
+if (removeYesBtn) {
+  removeYesBtn.addEventListener("click", () => {
+    closeRemoveModal();
+    resetWorkingState();
+    setPane("working");
+    vscode.postMessage({ type: "action", action: "disable" });
+  });
+}
+
+// "Hide untested updates" — persisted host-side so the red update banner and the
+// "Check for updates" result only surface STABLE releases. Reflected back via state.
+const hideUntestedChk = document.getElementById("hideUntestedChk");
+if (hideUntestedChk) {
+  hideUntestedChk.addEventListener("change", () => {
+    vscode.postMessage({ type: "setHideUntested", value: hideUntestedChk.checked });
+  });
 }
 
 document.querySelectorAll("[data-action]").forEach(btn => {
@@ -2069,7 +2229,6 @@ document.querySelectorAll("[data-action]").forEach(btn => {
       logBuf = "";
       logEl.textContent = "";
       logEl.classList.remove("visible");
-      detailsToggle.textContent = "Show details";
       setPane("idle");
       return;
     }
@@ -2095,7 +2254,6 @@ document.querySelectorAll("[data-action]").forEach(btn => {
     logBuf = "";
     logEl.textContent = "";
     logEl.classList.remove("visible");
-    detailsToggle.textContent = "Show details";
     resetWorkingState();
     setPane("working");
     // enablePrevious carries the rollback target version via the button's
@@ -2132,15 +2290,6 @@ document.querySelectorAll(".patchChk").forEach(chk => {
       .map(c => c.dataset.patchId);
     vscode.postMessage({ type: "setDisabledPatches", ids });
   });
-});
-
-detailsToggle.addEventListener("click", () => {
-  const showing = logEl.classList.toggle("visible");
-  detailsToggle.textContent = showing ? "Hide details" : "Show details";
-  if (showing) {
-    logEl.textContent = logBuf || "No console logs yet.";
-    logEl.scrollTop = logEl.scrollHeight;
-  }
 });
 
 function resetWorkingState() {
@@ -2223,7 +2372,7 @@ window.addEventListener("message", (ev) => {
     lastIdleState = m.state;
     const labels = {
       patched: ["patched", "Orbit patched"],
-      outdated: ["outdated", "Experimental update available"],
+      outdated: ["outdated", "Untested update available"],
       stock: ["stock", "Original Codex"],
       none: ["none", "Codex not installed"],
     };
@@ -2240,6 +2389,8 @@ window.addEventListener("message", (ev) => {
       claudeUpdateAvailable: m.claudeUpdateAvailable,
       patcherHistory: m.patcherHistory,
     });
+    var ccHideChk = document.getElementById("hideUntestedChk");
+    if (ccHideChk) ccHideChk.checked = !!m.hideUntested;
     lastHistory = Array.isArray(m.patcherHistory) ? m.patcherHistory : [];
     lastInstalledVersion = m.installedVersion || null;
     // Reveal the idle screen. Panes default to display:none and only show with
@@ -2300,7 +2451,7 @@ window.addEventListener("message", (ev) => {
       donePrimaryBtn.innerHTML = '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7a5.5 5.5 0 1 1-1.7-3.95"/><polyline points="13,1 13,4.2 9.8,4.2"/></svg>Restart Codex';
       if (m.action === "checkUpdates" && m.updateAvailable) {
         donePrimaryBtn.dataset.action = m.updateAction || "enable";
-        donePrimaryBtn.innerHTML = m.updateAction === "updateWrapper" ? "Update Orbit wrapper" : "Install experimental";
+        donePrimaryBtn.innerHTML = m.updateAction === "updateWrapper" ? "Update Orbit wrapper" : "Install untested";
       } else if (m.action === "checkUpdates") {
         donePrimaryBtn.hidden = true;
       } else if (!doneSub.textContent) {
@@ -2311,7 +2462,6 @@ window.addEventListener("message", (ev) => {
       resetCancelButton();
       errorSubEl.textContent = m.message || "Unknown error.";
       logEl.classList.add("visible");
-      detailsToggle.textContent = "Hide details";
       setPane("error");
     }
   }
@@ -2454,8 +2604,13 @@ function detectState(context) {
     if (patcherHistoryCached[0] && patcherHistoryCached[0].channel) return patcherHistoryCached[0].channel;
     return readReleaseChannel(context);
   })();
+  // "Hide untested updates" opt-in: when on, an available release is only treated
+  // as an update if its channel is explicitly "stable"; anything else (the default
+  // experimental/untested) is held back so the red banner never appears.
+  const hideUntested = !!context.globalState.get(GS_HIDE_UNTESTED);
+  const suppressUpdate = hideUntested && channel !== "stable";
   const ext = vscode.extensions.getExtension(STOCK_ID);
-  if (!ext) return { state: "none", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion: null, latestClaudeVersion: null, onLatestClaude: false, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached };
+  if (!ext) return { state: "none", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion: null, latestClaudeVersion: null, onLatestClaude: false, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached, hideUntested };
 
   // Codex's own version, read straight from its package.json via the
   // Extensions API. Lets us show "Patches active on Codex v2.1.150".
@@ -2467,42 +2622,66 @@ function detectState(context) {
   const onLatestClaude = !!claudeCodeVersion && !!latestClaudeVersion && cmpVer(claudeCodeVersion, latestClaudeVersion) >= 0;
 
   try {
-    const patchInfo = readInstalledPatchInfo();
-    if (patchInfo && patchInfo.patched) {
-      const installedVersion = patchInfo.version || null;
-      const installedChannel = patchInfo.channel || null;
-      // Determine "outdated" status:
-      //   1. Primary: compare installed vs remote (fetched from GitHub by the
-      //      background poller and cached in globalState).
-      //   2. No marker at all => pre-versioning build, always treat as outdated.
-      const isOutdated = !installedVersion
-        || (remoteVersion && cmpVer(installedVersion, remoteVersion) < 0);
-      // Installed Codex is behind the newest published version:
-      // re-patching pulls the newer Claude and re-applies the same patcher.
-      const claudeUpdateAvailable = !!claudeCodeVersion && !!latestClaudeVersion
-        && cmpVer(claudeCodeVersion, latestClaudeVersion) < 0;
-      // Full version list (newest-first) for the "Previous versions" picker,
-      // plus the single newest-older entry (kept for any internal callers).
-      const manifest = getEffectiveManifest(context);
-      const previousPatcher = pickPreviousPatcher(manifest, installedVersion);
-      const patcherHistory = patcherHistoryFromManifest(manifest);
-      return {
-        state: isOutdated ? "outdated" : "patched",
-        installedVersion,
-        installedChannel,
-        targetVersion,
-        channel,
-        remoteVersion,
-        claudeCodeVersion,
-        latestClaudeVersion,
-        onLatestClaude,
-        claudeUpdateAvailable,
-        previousPatcher,
-        patcherHistory,
-      };
+    const jsPath = path.join(ext.extensionUri.fsPath, "webview", "index.js");
+    if (fs.existsSync(jsPath)) {
+      const text = fs.readFileSync(jsPath, "utf8");
+      const isPatched =
+        text.indexOf("ccPatchSettingsBtn") !== -1 ||
+        text.indexOf("ccPatchSessionItem") !== -1;
+      if (isPatched) {
+        const m = text.match(/ccPatchBuildVersion="([^"]+)"/);
+        const installedVersion = m ? m[1] : null;
+        // The installed tag, read from the patcher itself (ccPatchChannel) — ships
+        // with the patcher, so no inference. null on a pre-1.2.86 patched build.
+        const chMatch = text.match(/ccPatchChannel="([^"]+)"/);
+        const installedChannelRaw = chMatch ? chMatch[1].trim().toLowerCase() : null;
+        const installedChannel = (installedChannelRaw === "experimental" || installedChannelRaw === "stable")
+          ? installedChannelRaw : null;
+        // Determine "outdated" status:
+        //   1. Primary: compare installed vs remote (fetched from GitHub by the
+        //      background poller and cached in globalState).
+        //   2. No marker at all => pre-versioning build, always treat as outdated.
+        const isOutdated = (!installedVersion
+          || (remoteVersion && cmpVer(installedVersion, remoteVersion) < 0))
+          && !suppressUpdate;   // hold back untested updates when the toggle is on
+        // Installed Codex is behind the newest published version:
+        // re-patching pulls the newer Claude and re-applies the same patcher.
+        const claudeUpdateAvailable = !!claudeCodeVersion && !!latestClaudeVersion
+          && cmpVer(claudeCodeVersion, latestClaudeVersion) < 0
+          && !suppressUpdate;   // same gate — re-patching would apply an untested build
+        // Full version list (newest-first) for the "Previous versions" picker,
+        // plus the single newest-older entry (kept for any internal callers).
+        const manifest = getEffectiveManifest(context);
+        const previousPatcher = pickPreviousPatcher(manifest, installedVersion);
+        const patcherHistory = patcherHistoryFromManifest(manifest);
+        // How many untested releases newer than the installed patcher are being
+        // held back by "Hide untested updates". Surfaced as a quiet hero line so
+        // the user knows something IS waiting (just hidden), without checking.
+        const hiddenUntestedCount = hideUntested
+          ? patcherHistory.filter(function (v) {
+              return v && v.version && v.channel !== "stable" && cmpVer(v.version, installedVersion) > 0;
+            }).length
+          : 0;
+        return {
+          state: isOutdated ? "outdated" : "patched",
+          installedVersion,
+          installedChannel,
+          targetVersion,
+          channel,
+          remoteVersion,
+          claudeCodeVersion,
+          latestClaudeVersion,
+          onLatestClaude,
+          claudeUpdateAvailable,
+          previousPatcher,
+          patcherHistory,
+          hideUntested,
+          hiddenUntestedCount,
+        };
+      }
     }
   } catch (_) {}
-  return { state: "stock", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion, latestClaudeVersion, onLatestClaude, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached };
+  return { state: "stock", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion, latestClaudeVersion, onLatestClaude, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached, hideUntested };
 }
 
 async function findPython() {

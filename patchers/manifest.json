@@ -77,11 +77,11 @@
     {
       "version": "0.5.44",
       "channel": "experimental",
-      "build": 62,
+      "build": 63,
       "codex": "26.5609.30741",
       "claude": "26.5609.30741",
       "file": "patch_codex-0.5.44.py",
-      "date": "2026-06-17"
+      "date": "2026-06-18"
     }
   ]
 }
