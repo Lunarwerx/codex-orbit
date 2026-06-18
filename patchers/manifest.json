@@ -95,7 +95,7 @@
     {
       "version": "0.5.46",
       "channel": "stable",
-      "build": 66,
+      "build": 67,
       "codex": "26.5609.30741",
       "claude": "26.5609.30741",
       "file": "patch_codex-0.5.46.py",
