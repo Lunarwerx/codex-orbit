@@ -91,6 +91,15 @@
       "claude": "26.5609.30741",
       "file": "patch_codex-0.5.45.py",
       "date": "2026-06-18"
+    },
+    {
+      "version": "0.5.46",
+      "channel": "stable",
+      "build": 66,
+      "codex": "26.5609.30741",
+      "claude": "26.5609.30741",
+      "file": "patch_codex-0.5.46.py",
+      "date": "2026-06-18"
     }
   ]
 }
