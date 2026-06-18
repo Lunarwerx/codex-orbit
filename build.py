@@ -36,12 +36,11 @@ WRAPPER_VERSION_SRC = ROOT / "wrapper_version.txt"
 BUILD_LOG = BUILDS_DIR / "BUILD_LOG.md"
 EXT_NAME = "codex-orbit"
 
-# Two icons on purpose: <Icon> is what VS Code shows in-editor (transparent
-# white mark, looks right on the dark Extensions UI and our webview/activity
-# bar, which all reuse media/codex-orbit.png). Services.Icons.Default is the
-# Marketplace web listing, which renders on white where a transparent mark
-# vanishes -> it points at media/codex-orbit-store.png (same mark, solid black
-# background). Store gets the black box; the app never sees it.
+# Icon: media/codex-orbit.png is the colorful gradient Orbit mark on a TRANSPARENT
+# background — visible on both the dark Extensions UI / activity bar and the white
+# Marketplace listing, so no solid-background variant is needed. codex-orbit-store.png
+# (Services.Icons.Default, the Marketplace web listing) is now the SAME gradient icon;
+# the old white-mark-on-solid-black store box was removed once the logo gained color.
 VSIX_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
