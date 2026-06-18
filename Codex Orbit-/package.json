@@ -2,7 +2,7 @@
   "name": "codex-orbit",
   "displayName": "Codex Orbit",
   "description": "Power-up for Codex: pin, archive, filter, search, and YOLO mode.",
-  "version": "1.2.8",
+  "version": "1.2.13",
   "publisher": "LunarWerx",
   "license": "MIT",
   "icon": "media/codex-orbit.png",
