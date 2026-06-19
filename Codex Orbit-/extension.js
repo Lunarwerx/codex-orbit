@@ -62,9 +62,15 @@ const OTA_RELEASE_CHANNEL_URL = OTA_BASE + "/release_channel.txt";
 const OTA_PATCHERS_BASE = OTA_BASE + "/patchers";
 const OTA_PATCHERS_MANIFEST_URL = OTA_PATCHERS_BASE + "/manifest.json";
 
-// Background polling: how often to check GitHub for a new patcher version.
-const POLL_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
-const STARTUP_DELAY_MS = 30 * 1000;           // wait 30s before first check
+// Background polling: how often to check GitHub for a new patcher version. GitHub raw
+// is CDN-cached and cheap, so a tight interval auto-surfaces a new push within ~a minute
+// WITHOUT the user clicking off/on the panel (the old 4-hour interval is why it felt dead).
+const POLL_INTERVAL_MS = 60 * 1000;           // 60 seconds
+const STARTUP_DELAY_MS = 8 * 1000;            // first check ~8s after the window loads
+// The Marketplace "newest Codex" lookup (fetchLatestClaudeVersion) is heavier than
+// the GitHub raw checks, so it is throttled INDEPENDENTLY of the poll — at most once per
+// this interval — so a 60s poll never hammers the VS Marketplace gallery at scale.
+const CLAUDE_FETCH_THROTTLE_MS = 10 * 60 * 1000; // 10 minutes
 
 // globalState keys for cross-session persistence of the remote version and
 // notification deduplication.
@@ -80,10 +86,12 @@ const GS_LAST_NOTIFIED_CLAUDE = "codexOrbit.lastNotifiedClaudeVersion";
 // the synchronous detectState() can offer "Use previous version" with no network.
 const GS_PATCHER_MANIFEST = "codexOrbit.patcherManifest";
 const GS_DISABLED_PATCHES = "codexOrbit.disabledPatches";
-// User opt-in: when true, untested (experimental) releases are not surfaced as
-// updates — the red banner, the status-bar badge, and "Check for updates" only
-// flag STABLE releases. Default false (untested visible, matching the red tag).
-const GS_HIDE_UNTESTED = "codexOrbit.hideUntested";
+// Beta program (OPT-IN). Default: a user only ever sees STABLE updates. Opting in via
+// the gear ("Join the Beta program") flips this true and they start getting beta (the
+// red BETA tag) releases the moment they're pushed. So non-stable updates are HIDDEN
+// unless opted in — the inverse of the old opt-out "hide untested" toggle. Local vars
+// named `hideUntested` below mean "hide non-stable", now sourced from `!betaOptIn`.
+const GS_BETA_OPTIN = "codexOrbit.betaOptIn";
 
 const REAPER_DEFAULT_MIN_AGE_MINUTES = 6;
 const REAPER_DEFAULT_INTERVAL_MINUTES = 3;
@@ -154,6 +162,14 @@ function activate(context) {
 
   // --- Background patcher-version polling ---
   startBackgroundPolling(context, provider, statusBarItem);
+
+  // Also re-check the instant the VS Code window regains focus, so coming back to the
+  // editor after a push surfaces "Install newest" on its own. autoCheck() is throttled to
+  // once a minute, so refocus spam can't hammer GitHub. This + the 60s poll above means an
+  // update appears without the user toggling the panel off and back on.
+  context.subscriptions.push(
+    vscode.window.onDidChangeWindowState((e) => { if (e && e.focused) provider.autoCheck(); })
+  );
 }
 
 function getReaperConfig() {
@@ -595,7 +611,7 @@ function patcherHistoryFromManifest(manifest) {
     .filter((p) => p && p.version && p.file && p.claude)
     .slice()
     .sort((a, b) => cmpVer(b.version, a.version))   // newest first
-    .map((p) => ({ version: p.version, claude: p.claude, build: (p.build != null ? p.build : null), channel: (p.channel || null) }));
+    .map((p) => ({ version: p.version, claude: p.claude, build: (p.build != null ? p.build : null), channel: (p.channel || null), whatsNew: (p.whatsNew || "") }));
 }
 
 /**
@@ -830,7 +846,15 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
     // even when our (version-agnostic) patcher itself hasn't changed. Refresh the
     // sidebar when the value actually changes so the hero updates without a reload.
     const prevLatestClaude = context.globalState.get(GS_LATEST_CLAUDE_VERSION);
-    const latestClaude = await fetchLatestClaudeVersion();
+    // Throttle the heavier Marketplace lookup independently of the (now 60s) poll: refetch
+    // the newest Codex at most once per CLAUDE_FETCH_THROTTLE_MS, else reuse the cache.
+    let latestClaude;
+    if (Date.now() - (globalThis.__ccOrbitLastClaudeFetch || 0) > CLAUDE_FETCH_THROTTLE_MS) {
+      globalThis.__ccOrbitLastClaudeFetch = Date.now();
+      latestClaude = await fetchLatestClaudeVersion();
+    } else {
+      latestClaude = context.globalState.get(GS_LATEST_CLAUDE_VERSION) || null;
+    }
     if (latestClaude) {
       await context.globalState.update(GS_LATEST_CLAUDE_VERSION, latestClaude);
       if (latestClaude !== prevLatestClaude && provider && !provider.busy) provider.pushState();
@@ -853,7 +877,7 @@ async function checkForPatcherUpdate(context, provider, statusBarItem) {
     // "Hide untested updates" opt-in: when on, an experimental release doesn't
     // flip the status-bar badge either (the hero is gated in detectState, and the
     // stable-only toast already won't fire). Treat it as up-to-date for the badge.
-    const hideUntested = !!context.globalState.get(GS_HIDE_UNTESTED);
+    const hideUntested = !context.globalState.get(GS_BETA_OPTIN); // hide non-stable unless opted into beta
     const suppressUntested = hideUntested && releaseChannel !== "stable";
 
     if (!suppressUntested && cmpVer(installedVersion, remoteVersion) < 0) {
@@ -1013,12 +1037,11 @@ class SidebarProvider {
       this.log("Patch selection saved (left out: " + (ids.join(", ") || "none") + ")");
       return;
     }
-    if (msg.type === "setHideUntested") {
-      await this.context.globalState.update(GS_HIDE_UNTESTED, !!msg.value);
-      this.log("Hide untested updates: " + (msg.value ? "ON (only stable releases shown)" : "OFF"));
-      // Re-evaluate the hero immediately so an experimental update banner appears
-      // or disappears the moment the toggle flips (the status-bar badge follows on
-      // the next background poll).
+    if (msg.type === "setBetaOptIn") {
+      // The join confirmation is an in-sidebar popup (webview side), so just persist here.
+      await this.context.globalState.update(GS_BETA_OPTIN, !!msg.value);
+      this.log("Beta program: " + (msg.value ? "JOINED (beta releases now shown)" : "left (stable only)"));
+      // Re-evaluate the hero/badge immediately so beta updates appear/disappear at once.
       this.pushState();
       return;
     }
@@ -1097,11 +1120,11 @@ class SidebarProvider {
             } else if (!installedVersion) {
               updateAvailable = true;
               resultMsg = "Codex is not patched yet.";
-              resultSub = "GitHub untested patcher is v" + remoteVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install untested now?";
+              resultSub = "GitHub beta patcher is v" + remoteVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install beta now?";
             } else if (cmpVer(installedVersion, remoteVersion) < 0) {
               updateAvailable = true;
-              resultMsg = "Untested patcher v" + remoteVersion + " is available.";
-              resultSub = "Installed Codex has patcher v" + installedVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install untested now?";
+              resultMsg = "Beta patcher v" + remoteVersion + " is available.";
+              resultSub = "Installed Codex has patcher v" + installedVersion + ". Orbit wrapper UI is v" + wrapperVersion + ". Install beta now?";
             } else if (claudeOutdated) {
               updateAvailable = true;
               updateAction = "enable";
@@ -1156,7 +1179,7 @@ class SidebarProvider {
             // gate genuine updates to an already-installed patch, never the
             // first-time install.
             if (updateAvailable && installedVersion && releaseChannel !== "stable"
-                && this.context.globalState.get(GS_HIDE_UNTESTED)) {
+                && !this.context.globalState.get(GS_BETA_OPTIN)) {
               // Count the untested releases newer than the installed patcher that
               // are being held back, so the message says HOW MANY are waiting (not
               // just "an update exists"). At least 1 — we already found remoteVersion.
@@ -1166,11 +1189,11 @@ class SidebarProvider {
               if (ccHidden < 1) ccHidden = 1;
               updateAvailable = false;
               updateAction = "enable";
-              resultMsg = "No stable updates — " + ccHidden + " untested update" + (ccHidden === 1 ? "" : "s") + " hidden.";
+              resultMsg = "No stable updates — " + ccHidden + " beta update" + (ccHidden === 1 ? "" : "s") + " available.";
               resultSub = (ccHidden === 1
-                ? "An untested release (v" + remoteVersion + ") is available but held back by "
-                : ccHidden + " untested releases (newest v" + remoteVersion + ") are available but held back by ")
-                + "“Hide untested updates” in the gear menu. Turn it off to install " + (ccHidden === 1 ? "it." : "them.");
+                ? "A beta release (v" + remoteVersion + ") is available, but you're not in the Beta program. "
+                : ccHidden + " beta releases (newest v" + remoteVersion + ") are available, but you're not in the Beta program. ")
+                + "Use “Join the Beta program” in the gear menu to install " + (ccHidden === 1 ? "it." : "them.");
               resultSubHtml = "";
             }
           } catch (err) {
@@ -1673,6 +1696,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .gearToggleSub{font-size:10.5px;opacity:.5;font-weight:400}
 .btn.danger{background:rgba(229,72,77,.16);color:#ff6b6b;border-color:rgba(229,72,77,.45)}
 .btn.danger:hover{background:rgba(229,72,77,.28)}
+/* Beta-program button: a distinct accent highlight so it stands out from the plain gear buttons. */
+#betaBtn{border-color:rgba(167,139,250,.5);background:rgba(167,139,250,.10)}
+#betaBtn svg{color:#c4b5fd}
+#betaBtn:hover{background:rgba(167,139,250,.18);border-color:rgba(167,139,250,.78)}
+/* Remove Orbit: red, because it's a destructive action. */
+#disableBtn{color:#ff7a7a}
+#disableBtn svg{color:#ff7a7a;opacity:.85}
+#disableBtn:hover{background:rgba(229,72,77,.16);color:#ff9494}
 /* Remove-Orbit confirmation modal — a real centered popup over a dimmed
    backdrop, replacing the old inline slide-down inside the gear menu. */
 .modalOverlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
@@ -1687,6 +1718,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .modalText{margin:0 0 18px;font-size:12.5px;opacity:.68;line-height:1.5}
 .modalBtns{display:flex;gap:10px}
 .modalBtns .btn{flex:1;margin-bottom:0;justify-content:center}
+/* Patch-notes popup — scrollable release notes (gear "Patch notes" + the "?" on each version row). */
+.pnBox{width:min(420px,100%);max-height:76vh;padding:0;text-align:left;display:flex;flex-direction:column;overflow:hidden}
+.pnHead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px 11px;flex-shrink:0;border-bottom:1px solid var(--vscode-menu-border,rgba(127,127,127,.22))}
+.pnHead .modalTitle{margin:0}
+.pnClose{background:none;border:none;color:inherit;opacity:.55;font-size:20px;line-height:1;cursor:pointer;padding:0 4px;flex-shrink:0}
+.pnClose:hover{opacity:1}
+.pnBody{overflow-y:auto;padding:13px 16px 16px;white-space:pre-wrap;font-size:12px;line-height:1.55;word-break:break-word;text-align:left}
+.pnBody .pnEmpty{opacity:.5;font-style:italic}
+.verItemHelp{flex:0 0 auto;width:22px;height:22px;border-radius:50%;border:1px solid var(--vscode-menu-border,rgba(127,127,127,.35));background:transparent;color:inherit;opacity:.55;font-size:12px;line-height:1;cursor:pointer;padding:0}
+.verItemHelp:hover{opacity:1;background:rgba(127,127,127,.14)}
+/* Beta popup — smaller, scannable, higher-contrast than the generic modal text. */
+.betaTitle{font-size:14px;margin-bottom:11px}
+.betaText{font-size:11px;line-height:1.6;text-align:left;opacity:.9;margin:0 0 16px}
+.betaText p{margin:0 0 8px}
+.betaText p:last-child{margin:0}
+.betaText b{font-weight:600}
 .recHeader{font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
   opacity:.5;text-align:center;margin:0 0 14px}
 .recHeaderCompany{margin-top:20px}
@@ -1740,13 +1787,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
       <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7a5.5 5.5 0 1 1-1.7-3.95"/><polyline points="13,1 13,4.2 9.8,4.2"/></svg>
       Check for updates
     </button>
-    <label class="gearToggle" id="hideUntestedRow"
-           title="When on, the red 'update available' banner and update prompts only appear for STABLE releases. Untested (experimental) releases stay hidden until you turn this off.">
-      <input type="checkbox" id="hideUntestedChk"/>
-      <span class="gearToggleText">Hide untested updates
-        <span class="gearToggleSub">Only show stable releases</span>
-      </span>
-    </label>
+    <button class="btn" id="patchNotesBtn" type="button" title="See what changed in your installed Orbit patch.">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 1.5h5l3 3v8h-8z"/><path d="M8 1.5v3h3"/><path d="M5 7.5h4M5 9.5h4"/></svg>
+      Patch notes
+    </button>
+    <button class="btn" id="betaBtn" type="button"
+            title="Join the beta program to get new releases the moment they're pushed (they may have bugs). Off = stable only.">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1.7l1.55 3.15 3.45.5-2.5 2.45.6 3.45L7 9.55 3.85 11.2l.6-3.45-2.5-2.45 3.45-.5z"/></svg>
+      <span class="lbl" id="betaBtnLabel">Join the beta program</span>
+    </button>
     <button class="btn" id="versionsBtn" hidden
             title="Pick an earlier version to install — handy if the newest one misbehaves. Each shows the Codex it's built for and its build number.">
       <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7a5 5 0 1 0 1.5-3.6"/><polyline points="1.4,1.6 1.4,4.2 4,4.2"/><path d="M7 4.3V7l1.9 1.1"/></svg>
@@ -1789,6 +1838,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
       <button class="btn" id="enableBtn" data-action="enable">
         <span class="btnIcon" id="enableBtnIcon"></span>
         <span class="btnLabel" id="enableBtnLabel">Install newest</span>
+      </button>
+      <button class="btn" id="installStableBtn" hidden type="button"
+              title="Install the newest STABLE release, replacing the beta build you're on.">
+        <span class="btnLabel" id="installStableLabel">Install stable</span>
       </button>
       <div class="hint" id="idleHint"></div>
     </div>
@@ -1868,6 +1921,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
     </div>
   </div>
 
+  <!-- Patch-notes popup (scrollable). Filled client-side from the manifest's per-version whatsNew. -->
+  <div class="modalOverlay" id="pnModal" hidden>
+    <div class="modalBox pnBox" role="dialog" aria-modal="true" aria-labelledby="pnTitle">
+      <div class="pnHead">
+        <p class="modalTitle" id="pnTitle">What's new</p>
+        <button class="pnClose" id="pnClose" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="pnBody" id="pnBody"></div>
+    </div>
+  </div>
+
+  <!-- Beta program popup (adaptive: join warning / leave confirm; body filled by JS) -->
+  <div class="modalOverlay" id="betaModal" hidden>
+    <div class="modalBox" role="dialog" aria-modal="true" aria-labelledby="betaModalTitle">
+      <p class="modalTitle betaTitle" id="betaModalTitle">Join the beta program?</p>
+      <div class="betaText" id="betaModalText"></div>
+      <div class="modalBtns">
+        <button class="btn" id="betaCancelBtn" type="button">Cancel</button>
+        <button class="btn primary" id="betaJoinBtn" type="button">Join beta program</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script nonce="${nonce}">
@@ -1930,6 +2006,7 @@ function applyIdleState(state, info) {
   const patcherHistory = (info && info.patcherHistory) || [];
   const channel = info && info.channel;
   const installedChannel = info && info.installedChannel;   // read from the patcher itself (ccPatchChannel)
+  const betaOptIn = info && info.betaOptIn;
 
   // "Install newest" is the always-present primary verb (was "Use experimental").
   enableBtnIcon.innerHTML = ICON_CHECK;
@@ -1954,6 +2031,9 @@ function applyIdleState(state, info) {
   statusEl.hidden = false;
   patchedHero.classList.remove("updateAvailable", "experimental", "stable");
   patchedMeta.hidden = true;   // quiet patch-# line; only the normal patched view shows it
+  var installStableBtn = document.getElementById("installStableBtn");
+  var installStableLabel = document.getElementById("installStableLabel");
+  if (installStableBtn) installStableBtn.hidden = true;   // only shown for "on a beta, not in the program"
 
   if (state === "patched") {
     patchedHero.hidden = false;
@@ -1984,6 +2064,15 @@ function applyIdleState(state, info) {
           || (patcherHistory.find(function (v) { return v && v.version === installedVersion; }) || {}).channel;
         patchedTitle.appendChild(document.createTextNode(" "));
         patchedTitle.appendChild(ccChannelTag(ccInstCh));
+        // On a BETA build but NOT in the beta program -> offer a one-click drop to the
+        // newest STABLE release (patcherHistory is newest-first, so the first stable is newest).
+        var ccInstBeta = ccInstCh && ccInstCh !== "stable";
+        var ccNewestStable = patcherHistory.find(function (v) { return v && v.channel === "stable"; });
+        if (installStableBtn && ccInstBeta && !betaOptIn && ccNewestStable && ccNewestStable.version !== installedVersion) {
+          installStableBtn.hidden = false;
+          installStableBtn.dataset.version = ccNewestStable.version;
+          if (installStableLabel) installStableLabel.textContent = "Install stable (v" + ccNewestStable.version + ")";
+        }
       }
       // Claude version is the headline (+ a ✓ Latest badge when on the newest);
       // the Orbit patch # drops to a quiet meta line. Version strings are
@@ -2005,8 +2094,8 @@ function applyIdleState(state, info) {
       // back — so the user knows one is waiting without opening Check for updates.
       var ccHiddenN = (info && info.hiddenUntestedCount) || 0;
       if (ccHiddenN > 0) {
-        idleHint.textContent = ccHiddenN + " untested update" + (ccHiddenN === 1 ? "" : "s")
-          + " hidden · turn off “Hide untested updates” to install.";
+        idleHint.textContent = ccHiddenN + " beta update" + (ccHiddenN === 1 ? "" : "s")
+          + " available · join the Beta program (gear) to install.";
       } else {
         idleHint.innerHTML = '';
       }
@@ -2021,10 +2110,10 @@ function applyIdleState(state, info) {
     if (channel) {
       var ccHeroTag = document.createElement("span");
       ccHeroTag.className = "channelTag " + (channel === "stable" ? "stable" : "experimental");
-      ccHeroTag.textContent = channel === "stable" ? "STABLE" : "UNTESTED";
+      ccHeroTag.textContent = channel === "stable" ? "STABLE" : "BETA";
       ccHeroTag.title = channel === "stable"
         ? "Stable — tested and verified for this Codex version."
-        : "Untested — may include new or not-yet-tested features, or simply hasn't been verified against the newest Codex yet.";
+        : "Beta — a new release from the Beta program. Unverified; may have bugs or not be tested against the newest Codex yet.";
       patchedTitle.appendChild(document.createTextNode(" "));
       patchedTitle.appendChild(ccHeroTag);
     }
@@ -2086,10 +2175,10 @@ function ccChannelTag(channel) {
   var c = (channel === "stable") ? "stable" : "experimental";
   var t = document.createElement("span");
   t.className = "channelTag " + c;
-  t.textContent = c === "stable" ? "STABLE" : "UNTESTED";
+  t.textContent = c === "stable" ? "STABLE" : "BETA";
   t.title = c === "stable"
     ? "Stable — tested and verified for this Codex version."
-    : "Untested — may include new or not-yet-tested features, or simply hasn't been verified against the newest Codex yet.";
+    : "Beta — a new release from the Beta program. Unverified; may have bugs or not be tested against the newest Codex yet.";
   return t;
 }
 
@@ -2136,6 +2225,13 @@ function renderVersions() {
       });
     }
     row.appendChild(info);
+    const help = document.createElement("button");
+    help.className = "verItemHelp";
+    help.type = "button";
+    help.textContent = "?";
+    help.title = "Patch notes for v" + v.version;
+    help.addEventListener("click", function () { openPatchNotes(v.version); });
+    row.appendChild(help);
     row.appendChild(btn);
     verList.appendChild(row);
   });
@@ -2210,14 +2306,90 @@ if (removeYesBtn) {
   });
 }
 
-// "Hide untested updates" — persisted host-side so the red update banner and the
-// "Check for updates" result only surface STABLE releases. Reflected back via state.
-const hideUntestedChk = document.getElementById("hideUntestedChk");
-if (hideUntestedChk) {
-  hideUntestedChk.addEventListener("change", () => {
-    vscode.postMessage({ type: "setHideUntested", value: hideUntestedChk.checked });
-  });
+// "Join the Beta program" — OPT-IN (checked = joined). Persisted host-side; checking it
+// triggers a confirm dialog (beta is unverified). Reflected back via state (m.betaOptIn),
+// which reverts the checkbox if the user cancels the confirm.
+// ---- Beta program (opt-in) ------------------------------------------------
+// Clicking the gear item does NOT just toggle a checkbox: JOINING opens an in-sidebar
+// warning popup (then "Join beta program" confirms); LEAVING (already joined) is safe,
+// so it drops to stable-only directly. Button label reflects state via setBetaBtnLabel.
+const betaModal = document.getElementById("betaModal");
+const betaBtn = document.getElementById("betaBtn");
+const betaBtnLabel = document.getElementById("betaBtnLabel");
+const betaModalTitle = document.getElementById("betaModalTitle");
+const betaModalText = document.getElementById("betaModalText");
+const betaCancelBtn = document.getElementById("betaCancelBtn");
+const betaJoinBtn = document.getElementById("betaJoinBtn");
+let ccBetaJoined = false;
+function setBetaBtnLabel() { if (betaBtnLabel) betaBtnLabel.textContent = ccBetaJoined ? "Leave the beta program" : "Join the beta program"; }
+function closeBetaModal() { if (betaModal) betaModal.hidden = true; }
+function openBetaModal(mode) {
+  if (!betaModal) return;
+  var leaving = mode === "leave";
+  if (betaModalTitle) betaModalTitle.textContent = leaving ? "Leave the beta program?" : "Join the beta program?";
+  if (betaModalText) betaModalText.innerHTML = leaving
+    ? "<p>You'll stop getting beta updates and go back to <b>stable-only</b> releases.</p><p>If you're on a beta build right now, we recommend installing the latest stable to continue — you'll get an <b>Install stable</b> button on the main screen.</p>"
+    : "<p>Beta builds are <b>testing releases</b> — you get them the moment they ship.</p><p>They're <b>unverified</b>: they may have bugs, break things, or interrupt your work.</p><p>Stay out and you'll only ever get <b>stable</b>, tested releases.</p>";
+  if (betaJoinBtn) betaJoinBtn.textContent = leaving ? "Leave beta program" : "Join beta program";
+  betaModal.dataset.mode = leaving ? "leave" : "join";
+  betaModal.hidden = false;
 }
+if (betaBtn) betaBtn.addEventListener("click", () => { openBetaModal(ccBetaJoined ? "leave" : "join"); });
+if (betaCancelBtn) betaCancelBtn.addEventListener("click", closeBetaModal);
+if (betaJoinBtn) betaJoinBtn.addEventListener("click", () => { var leave = !!(betaModal && betaModal.dataset.mode === "leave"); closeBetaModal(); vscode.postMessage({ type: "setBetaOptIn", value: !leave }); });
+if (betaModal) betaModal.addEventListener("click", (e) => { if (e.target === betaModal) closeBetaModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeBetaModal(); });
+
+// "Install stable" — drop from a beta build to the newest stable (version stamped by the render).
+const installStableBtnEl = document.getElementById("installStableBtn");
+if (installStableBtnEl) installStableBtnEl.addEventListener("click", () => {
+  const v = installStableBtnEl.dataset.version;
+  if (!v) return;
+  setPane("working");
+  vscode.postMessage({ type: "action", action: "enablePrevious", version: v });
+});
+
+// ---- Patch notes popup ----------------------------------------------------
+// Notes ride in the manifest (lastHistory[i].whatsNew), so the popup is fully
+// client-side. Rendered as plain text (textContent) = XSS-safe; CSS preserves the
+// line breaks. Opened from the gear ("Patch notes" -> installed version) and the
+// "?" on each Previous-versions row (that row's version).
+const pnModal = document.getElementById("pnModal");
+const pnTitle = document.getElementById("pnTitle");
+const pnBody = document.getElementById("pnBody");
+function whatsNewFor(version) {
+  try {
+    const e = (lastHistory || []).find(v => v && v.version === version);
+    return (e && e.whatsNew) || "";
+  } catch (_) { return ""; }
+}
+function openPatchNotes(version) {
+  if (!pnModal) return;
+  const notes = whatsNewFor(version);
+  pnTitle.textContent = "What's new" + (version ? " — v" + version : "");
+  pnBody.textContent = "";
+  if (notes && notes.trim()) {
+    pnBody.textContent = notes;
+  } else {
+    const em = document.createElement("div");
+    em.className = "pnEmpty";
+    em.textContent = "No patch notes were shipped for this version.";
+    pnBody.appendChild(em);
+  }
+  pnBody.scrollTop = 0;
+  pnModal.hidden = false;
+}
+function closePatchNotes() { if (pnModal) pnModal.hidden = true; }
+const pnCloseBtn = document.getElementById("pnClose");
+if (pnCloseBtn) pnCloseBtn.addEventListener("click", closePatchNotes);
+if (pnModal) pnModal.addEventListener("click", (e) => { if (e.target === pnModal) closePatchNotes(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePatchNotes(); });
+const patchNotesBtn = document.getElementById("patchNotesBtn");
+if (patchNotesBtn) patchNotesBtn.addEventListener("click", () => {
+  // Installed version's notes; fall back to the newest known version if not patched yet.
+  const v = lastInstalledVersion || ((lastHistory && lastHistory[0] && lastHistory[0].version) || null);
+  openPatchNotes(v);
+});
 
 document.querySelectorAll("[data-action]").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -2372,7 +2544,7 @@ window.addEventListener("message", (ev) => {
     lastIdleState = m.state;
     const labels = {
       patched: ["patched", "Orbit patched"],
-      outdated: ["outdated", "Untested update available"],
+      outdated: ["outdated", "Beta update available"],
       stock: ["stock", "Original Codex"],
       none: ["none", "Codex not installed"],
     };
@@ -2388,9 +2560,10 @@ window.addEventListener("message", (ev) => {
       onLatestClaude: m.onLatestClaude,
       claudeUpdateAvailable: m.claudeUpdateAvailable,
       patcherHistory: m.patcherHistory,
+      betaOptIn: m.betaOptIn,
     });
-    var ccHideChk = document.getElementById("hideUntestedChk");
-    if (ccHideChk) ccHideChk.checked = !!m.hideUntested;
+    ccBetaJoined = !!m.betaOptIn;
+    setBetaBtnLabel();
     lastHistory = Array.isArray(m.patcherHistory) ? m.patcherHistory : [];
     lastInstalledVersion = m.installedVersion || null;
     // Reveal the idle screen. Panes default to display:none and only show with
@@ -2451,7 +2624,7 @@ window.addEventListener("message", (ev) => {
       donePrimaryBtn.innerHTML = '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7a5.5 5.5 0 1 1-1.7-3.95"/><polyline points="13,1 13,4.2 9.8,4.2"/></svg>Restart Codex';
       if (m.action === "checkUpdates" && m.updateAvailable) {
         donePrimaryBtn.dataset.action = m.updateAction || "enable";
-        donePrimaryBtn.innerHTML = m.updateAction === "updateWrapper" ? "Update Orbit wrapper" : "Install untested";
+        donePrimaryBtn.innerHTML = m.updateAction === "updateWrapper" ? "Update Orbit wrapper" : "Install beta";
       } else if (m.action === "checkUpdates") {
         donePrimaryBtn.hidden = true;
       } else if (!doneSub.textContent) {
@@ -2607,10 +2780,11 @@ function detectState(context) {
   // "Hide untested updates" opt-in: when on, an available release is only treated
   // as an update if its channel is explicitly "stable"; anything else (the default
   // experimental/untested) is held back so the red banner never appears.
-  const hideUntested = !!context.globalState.get(GS_HIDE_UNTESTED);
+  const hideUntested = !context.globalState.get(GS_BETA_OPTIN); // hide non-stable unless opted into beta
   const suppressUpdate = hideUntested && channel !== "stable";
+  const betaOptIn = !hideUntested;
   const ext = vscode.extensions.getExtension(STOCK_ID);
-  if (!ext) return { state: "none", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion: null, latestClaudeVersion: null, onLatestClaude: false, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached, hideUntested };
+  if (!ext) return { state: "none", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion: null, latestClaudeVersion: null, onLatestClaude: false, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached, hideUntested, betaOptIn };
 
   // Codex's own version, read straight from its package.json via the
   // Extensions API. Lets us show "Patches active on Codex v2.1.150".
@@ -2676,12 +2850,13 @@ function detectState(context) {
           previousPatcher,
           patcherHistory,
           hideUntested,
+          betaOptIn,
           hiddenUntestedCount,
         };
       }
     }
   } catch (_) {}
-  return { state: "stock", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion, latestClaudeVersion, onLatestClaude, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached, hideUntested };
+  return { state: "stock", installedVersion: null, targetVersion, remoteVersion, claudeCodeVersion, latestClaudeVersion, onLatestClaude, claudeUpdateAvailable: false, previousPatcher: null, patcherHistory: patcherHistoryCached, hideUntested, betaOptIn };
 }
 
 async function findPython() {
