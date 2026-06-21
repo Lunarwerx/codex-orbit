@@ -103,8 +103,8 @@
     },
     {
       "version": "0.5.47",
-      "channel": "experimental",
-      "build": 72,
+      "channel": "stable",
+      "build": 73,
       "codex": "26.5616.51431",
       "claude": "26.5616.51431",
       "file": "patch_codex-0.5.47.py",
