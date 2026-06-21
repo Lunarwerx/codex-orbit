@@ -27,7 +27,7 @@ __version__ = "0.5.47"
 # (list/available tag). DEFAULT experimental — only `tools/ship.py --stable` flips it.
 # Format is load-bearing: tools/ship.py and archive_patcher.py read it via the regex
 # ^ORBIT_CHANNEL:\s*str\s*=\s*"([^"]+)" — keep the `: str =` shape.
-ORBIT_CHANNEL: str = "experimental"
+ORBIT_CHANNEL: str = "stable"
 DEFAULT_MARKETPLACE_ITEM = "openai.chatgpt"
 MARKETPLACE_QUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
 LOG_PATH = None
