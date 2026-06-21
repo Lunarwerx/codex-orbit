@@ -109,6 +109,15 @@
       "claude": "26.5616.51431",
       "file": "patch_codex-0.5.47.py",
       "date": "2026-06-20"
+    },
+    {
+      "version": "0.5.48",
+      "channel": "stable",
+      "build": 74,
+      "codex": "26.5616.51431",
+      "claude": "26.5616.51431",
+      "file": "patch_codex-0.5.48.py",
+      "date": "2026-06-20"
     }
   ]
 }
