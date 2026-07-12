@@ -44,8 +44,7 @@ python tools/ship.py --no-certify   # channel-stamp + build only (skip newest-Co
 
 It stamps `ORBIT_CHANNEL` in `stable/patch_codex.py`, writes `release_channel.txt`,
 re-certifies (writes `stable_version.txt`), and runs `build.py`. Then commit + push
-the printed file list and confirm the CDN serves the new patcher code. See
-`AGENTS.md` § "Releases default to EXPERIMENTAL" for the full channel rule.
+the printed file list and confirm the CDN serves the new patcher code. Releases default to the EXPERIMENTAL channel.
 
 ## Verify A Baseline
 
