@@ -2,6 +2,8 @@
 
 **A patch companion for OpenAI's Codex VS Code extension.**
 
+[![Discord](https://img.shields.io/badge/Discord-join_the_community-5865F2?logo=discord&logoColor=white)](https://discord.gg/PsWpeNUzhk)
+
 Codex Orbit is a thin wrapper VSIX that downloads the official `openai.chatgpt`
 Codex VSIX, applies a verified patch baseline, and installs the patched result.
 The wrapper itself does not redistribute the stock Codex extension; patching
