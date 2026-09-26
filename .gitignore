@@ -44,3 +44,12 @@ Thumbs.db
 .idea/
 *.log
 logs/
+# Runtime output: the pasted console log and the webview debug dump (it carries
+# machine paths and chat-thread titles from other projects, so it stays local).
+/logs
+/codex-orbit-debug.json
+# Internal AI-ops docs stay local, off the public tree (see 57093f0).
+/AGENTS.md
+/JUSTIFY_EXISTENCE.md
+/CLAUDE.md
+/docs/guides/
