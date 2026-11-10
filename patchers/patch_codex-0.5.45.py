@@ -470,7 +470,7 @@ SIDEBAR_IIFE = r"""
       if(!nativeRows||!nativeRows.length) return null;
       const activeNative=nativeRows.find((t)=>t.current||t.active);
       if(activeNative){
-        setCurrent(activeNative.cwd,activeNative.project);
+        if(!hostWorkspace()) setCurrent(activeNative.cwd,activeNative.project);
         const activeProject=clean(activeNative.project).toLowerCase();
         const sameProject=rows.filter((t)=>clean(t.project).toLowerCase()===activeProject);
         if(sameProject.length) return sameProject;
@@ -489,7 +489,7 @@ SIDEBAR_IIFE = r"""
       const scoped=rows.filter((t)=>ids.has(String(t.__id))||ids.has(String(t.id))||titles.has(threadTitleKey(t.title)));
       if(scoped.length){
         const a=nativeRows.find((t)=>t.current||t.active)||nativeRows[0];
-        if(a) setCurrent(a.cwd,a.project);
+        if(a&&!hostWorkspace()) setCurrent(a.cwd,a.project);
         return scoped;
       }
       return null;
@@ -507,12 +507,12 @@ SIDEBAR_IIFE = r"""
       if(oid){
         const ot=rows.find((t)=>String(t.id)===oid||String(t.__id)===oid)
               ||(nativeRows||[]).find((t)=>String(t.id)===oid||String(t.__id)===oid);
-        if(ot) setCurrent(ot.cwd,ot.project);
+        if(ot&&!hw) setCurrent(ot.cwd,ot.project);
       }
       //  2) Codex's active-workspace-roots[0] (a path), if we captured the RPC reply.
       if(!curRoot&&!curLabel&&activeRoots[0]) setCurrent(activeRoots[0],lastSeg(activeRoots[0]));
       //  3) Any chat the data/DOM marks current/active.
-      if(!curRoot&&!curLabel){ const a=rows.find((t)=>t.current||t.active)||(nativeRows||[]).find((t)=>t.current||t.active); if(a) setCurrent(a.cwd,a.project); }
+      if(!curRoot&&!curLabel&&!hw){ const a=rows.find((t)=>t.current||t.active)||(nativeRows||[]).find((t)=>t.current||t.active); if(a) setCurrent(a.cwd,a.project); }
       // Known workspace -> filter (by cwd path when a chat carries one, else by exact
       // project name). When home is KNOWN we return only its threads — even if that is
       // an EMPTY set. Falling through to the blind "show a few" cap on an empty match is
@@ -1577,11 +1577,11 @@ def copy_patched_assets(extension_dir, patcher_version):
     if feature_on("status-dots"):
         expose_status_stream(wv)
     else:
-        log("Skipping status-dots (patch disabled) — rows show relative time only")
+        log("Skipping status-dots stream hook (patch disabled) — row status still comes from the sidebar's own data")
     if feature_on("workspace-filter"):
         inject_workspace_meta(ext)
     else:
-        log("Skipping workspace-filter (patch disabled) — sidebar shows every project")
+        log("Skipping workspace-filter host stamp (patch disabled) — the sidebar still filters by open chat, roots and project labels")
     inject_agents_opener(ext)
     text = helper.read_text(encoding="utf-8", errors="ignore")
     if "__codexOrbitSidebarV4" not in text:
@@ -1829,19 +1829,19 @@ AGENTS_OPEN_CASE = (
     'case"codex-orbit-read-agents":{let n=r.scope==="global"?"global":"project",o="",i="",s=!1,a=null;'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
     'if(o)try{i=await iC.promises.readFile(o,"utf8"),s=!0}catch(c){let l=c;if(!("code"in l&&l.code==="ENOENT"))a=String(l&&l.message||l)}'
     'this.postMessageToWebview(e,{type:"codex-orbit-agents-file",scope:n,path:o,content:i,exists:s,error:a});break}'
     'case"codex-orbit-save-agents":{let n=r.scope==="global"?"global":"project",o="",i=typeof r.content==="string"?r.content:"",s=null;'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
     'if(o)try{await iC.promises.mkdir(nde.dirname(o),{recursive:!0});await iC.promises.writeFile(o,i,"utf8")}catch(a){s=String(a&&a.message||a)}else s="No workspace folder";'
     'this.postMessageToWebview(e,{type:"codex-orbit-agents-saved",scope:n,path:o,content:i,exists:!s,error:s});break}'
     'case"codex-orbit-open-agents":{let n=r.scope==="global"?"global":"project",o="";'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
     'if(o){await iC.promises.mkdir(nde.dirname(o),{recursive:!0});'
     'try{await iC.promises.access(o)}catch(i){let s=i;if("code"in s&&s.code==="ENOENT")await iC.promises.writeFile(o,"");else throw i}'
     'await Oe.commands.executeCommand("vscode.open",Oe.Uri.file(o))}break}'

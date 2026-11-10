@@ -1751,7 +1751,15 @@ STATUS_ANCHOR_RE = re.compile(
     r"updateConversationState\(e,t\)\{let n=this\.getConversation\(e\);"
     r"if\(n==null\)return;let r=\w+\(n,t\);this\.applyConversationState\(e,r\)\}"
 )
-STATUS_HOOK_TAIL = ";try{if(window.__codexOrbitStatusHook)window.__codexOrbitStatusHook(e,r)}catch(_co){}}"
+STATUS_HOOK_CALL = "window.__codexOrbitStatusHook(e,r)"   # the spliced call; the sidebar helper only ever defines the hook
+USAGE_ROWS_EVENT = 'new CustomEvent("codex-orbit-usage-rows"'  # the spliced dispatch; the helper only listens for it
+STATUS_HOOK_TAIL = ";try{if(window.__codexOrbitStatusHook)" + STATUS_HOOK_CALL + "}catch(_co){}}"
+
+
+def _chunk_with(assets, needle):
+    """First webview chunk (not a source map) that holds the spliced `needle`."""
+    return next((p for p in assets.glob("*.js")
+                 if not p.name.endswith(".map") and needle in p.read_text(encoding="utf-8", errors="ignore")), None)
 
 
 def expose_status_stream(wv):
@@ -1919,8 +1927,7 @@ def verify(ext_dir):
     # Strict-check the status chunk we hooked (an ESM webview chunk — a broken one would break
     # Codex's conversation engine, not just our sidebar). Same strict module parser as the helper.
     if node:
-        sc = next((p for p in (ext_dir / "webview" / "assets").glob("*.js")
-                   if not p.name.endswith(".map") and "__codexOrbitStatusHook" in p.read_text(encoding="utf-8", errors="ignore")), None)
+        sc = _chunk_with(ext_dir / "webview" / "assets", STATUS_HOOK_CALL)
         if sc:
             rs = subprocess.run([node, "--input-type=module", "--check", "-"],
                                 input=sc.read_text(encoding="utf-8", errors="ignore"), capture_output=True, text=True, encoding="utf-8")
@@ -1930,8 +1937,7 @@ def verify(ext_dir):
             log("Status chunk syntax check passed; live-status hook confirmed present")
         else:
             log("NOTE live-status hook NOT present (updateConversationState anchor missed) — live status stays best-effort")
-        uc = next((p for p in (ext_dir / "webview" / "assets").glob("*.js")
-                   if not p.name.endswith(".map") and "__codexOrbitUsageRows" in p.read_text(encoding="utf-8", errors="ignore")), None)
+        uc = _chunk_with(ext_dir / "webview" / "assets", USAGE_ROWS_EVENT)
         if uc:
             ru = subprocess.run([node, "--input-type=module", "--check", "-"],
                                 input=uc.read_text(encoding="utf-8", errors="ignore"), capture_output=True, text=True, encoding="utf-8")

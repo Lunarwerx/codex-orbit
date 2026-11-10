@@ -23,6 +23,10 @@ import argparse, base64, datetime as dt, gzip, json, platform, shutil, subproces
 from pathlib import Path
 
 __version__ = "0.4.0"
+# Release channel that ships INSIDE every patched build (see tools/ship.py stamp_channel).
+# Format is load-bearing: ship.py and archive_patcher.py read it via the regex
+# ^ORBIT_CHANNEL:\s*str\s*=\s*"([^"]+)" — keep the `: str =` shape.
+ORBIT_CHANNEL: str = "experimental"
 DEFAULT_MARKETPLACE_ITEM = "openai.chatgpt"
 MARKETPLACE_QUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
 LOG_PATH = None
@@ -101,6 +105,7 @@ def apply_edits(text, edits):
     ops = []; missed = []
     for e in edits:
         if e["op"] == "append":
+            if e["inserted"] in text: continue  # already appended on an earlier run: never re-append
             ops.append((len(text), 0, e["inserted"])); continue
         anc = e["anchor"]; i = text.find(anc)
         if i == -1 or text.find(anc, i + 1) != -1:
@@ -115,11 +120,13 @@ def apply_edits(text, edits):
 
 def _choose(wv, prefix, edits):
     cands = [p for p in wv.glob(prefix + "*.js") if not p.name.endswith(".js.map")]
-    best = None
+    anchored = [e for e in edits if e["op"] != "append"]  # appends land on any file, so they never pick one
+    best = None; best_score = -1
     for p in cands:
         txt = p.read_text(encoding="utf-8", errors="ignore")
         patched, applied, missed = apply_edits(txt, edits)
-        if best is None or applied > best[1]: best = (p, applied, missed, patched)
+        score = apply_edits(txt, anchored)[1]
+        if score > best_score: best = (p, applied, missed, patched); best_score = score
     return best
 
 def patch_package_json(ext_dir):
@@ -229,7 +236,7 @@ def main():
         copy_patched_assets(ext, a.patcher_version)
         verify_dynamic(ext)
         log("Writing patched VSIX"); zip_dir(root, out)
-    log(f"Patched VSIX written: {out}"); log("Overall status: dynamic patch complete")
+    log(f"Patched VSIX written: {out}"); log("Overall status: sidebar injected")
     return 0
 
 if __name__ == "__main__":

@@ -429,8 +429,10 @@ SIDEBAR_IIFE = r"""
     function setCurrent(root,label){
       const r=normPath(root||""), l=clean(label||"").toLowerCase();
       let ch=false;
-      if(r&&r!==curRoot){ curRoot=r; ch=true; }
-      if(l&&l!==curLabel){ curLabel=l; ch=true; }
+      // Root and label move together: a new root takes its own label (or none), so a stale
+      // label from the previous workspace can never outlive a root change.
+      if(r&&r!==curRoot){ curRoot=r; curLabel=l; ch=true; }
+      else if(l&&l!==curLabel){ curLabel=l; ch=true; }
       if(ch){ try{ localStorage.setItem(CUR_KEY,JSON.stringify({r:curRoot,l:curLabel})); }catch{} }
     }
     function inCurrent(t){
@@ -485,6 +487,12 @@ SIDEBAR_IIFE = r"""
       //     which is exactly where the old build fell through and dumped ALL projects.
       const hw=hostWorkspace();
       if(hw) setCurrent(hw.r,hw.l);
+      else if(document.querySelector('meta[name="codex-orbit-workspace"]')&&(curRoot||curLabel)){
+        // The host stamped an EMPTY workspace (no folder open): forget the saved home, or the
+        // previous project would stay current forever.
+        curRoot=""; curLabel="";
+        try{ localStorage.setItem(CUR_KEY,JSON.stringify({r:"",l:""})); }catch{}
+      }
       //  1) The OPEN chat (its id is in the URL). Its project/cwd IS the current one.
       const oid=openThreadId();
       if(oid){
@@ -1408,11 +1416,11 @@ def copy_patched_assets(extension_dir, patcher_version):
     if feature_on("status-dots"):
         expose_status_stream(wv)
     else:
-        log("Skipping status-dots (patch disabled) — rows show relative time only")
+        log("Skipping status-dots hook (patch disabled) — rows still show status dots from the wire data")
     if feature_on("workspace-filter"):
         inject_workspace_meta(ext)
     else:
-        log("Skipping workspace-filter (patch disabled) — sidebar shows every project")
+        log("Skipping workspace-filter host meta (patch disabled) — sidebar still scopes by open chat, saved workspace and roots")
     inject_agents_opener(ext)
     text = helper.read_text(encoding="utf-8", errors="ignore")
     if "__codexOrbitSidebarV4" not in text:
@@ -1660,19 +1668,19 @@ AGENTS_OPEN_CASE = (
     'case"codex-orbit-read-agents":{let n=r.scope==="global"?"global":"project",o="",i="",s=!1,a=null;'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):""}'
     'if(o)try{i=await iC.promises.readFile(o,"utf8"),s=!0}catch(c){let l=c;if(!("code"in l&&l.code==="ENOENT"))a=String(l&&l.message||l)}'
     'this.postMessageToWebview(e,{type:"codex-orbit-agents-file",scope:n,path:o,content:i,exists:s,error:a});break}'
     'case"codex-orbit-save-agents":{let n=r.scope==="global"?"global":"project",o="",i=typeof r.content==="string"?r.content:"",s=null;'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):""}'
     'if(o)try{await iC.promises.mkdir(nde.dirname(o),{recursive:!0});await iC.promises.writeFile(o,i,"utf8")}catch(a){s=String(a&&a.message||a)}else s="No workspace folder";'
     'this.postMessageToWebview(e,{type:"codex-orbit-agents-saved",scope:n,path:o,content:i,exists:!s,error:s});break}'
     'case"codex-orbit-open-agents":{let n=r.scope==="global"?"global":"project",o="";'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):""}'
     'if(o){await iC.promises.mkdir(nde.dirname(o),{recursive:!0});'
     'try{await iC.promises.access(o)}catch(i){let s=i;if("code"in s&&s.code==="ENOENT")await iC.promises.writeFile(o,"");else throw i}'
     'await Oe.commands.executeCommand("vscode.open",Oe.Uri.file(o))}break}'

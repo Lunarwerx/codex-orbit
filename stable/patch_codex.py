@@ -59,7 +59,7 @@ SIDEBAR_IIFE = r"""
     if (typeof window === "undefined" || typeof document === "undefined" || window.__codexOrbitSidebarV4) return;
     window.__codexOrbitSidebarV4 = true;
 
-    const COLLAPSED_KEY="codexOrbitCollapsedV4", GROUP_KEY="codexOrbitGroupsV4", WIDTH_KEY="codexOrbitWidthV4", PIN_KEY="codexOrbitPinsV4", STAR_KEY="codexOrbitStarsV4", CUR_KEY="codexOrbitCurrentV4", COLOR_KEY="codexOrbitColorsV4", ARCH_KEY="codexOrbitArchivedV4", FILTER_KEY="codexOrbitFilterV4";
+    const COLLAPSED_KEY="codexOrbitCollapsedV4", GROUP_KEY="codexOrbitGroupsV4", WIDTH_KEY="codexOrbitWidthV4", PIN_KEY="codexOrbitPinsV4", STAR_KEY="codexOrbitStarsV4", PIN_OFF_KEY="codexOrbitPinsOffV4", STAR_OFF_KEY="codexOrbitStarsOffV4", CUR_KEY="codexOrbitCurrentV4", COLOR_KEY="codexOrbitColorsV4", ARCH_KEY="codexOrbitArchivedV4", FILTER_KEY="codexOrbitFilterV4";
     const OPEN_WIDTH=320;
     // Our palette (Codex ships no color set — its labelColor store is dormant, no UI).
     const PALETTE=[{k:"red",c:"#e5484d"},{k:"orange",c:"#f5a524"},{k:"yellow",c:"#f5d90a"},{k:"green",c:"#30a46c"},{k:"blue",c:"#3b82f6"},{k:"purple",c:"#8b5cf6"}];
@@ -78,18 +78,24 @@ SIDEBAR_IIFE = r"""
       dot:'<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.4" fill="currentColor"/></svg>'
     };
 
-    let shell=null, collapsed=false, search="", groupState=Object.create(null), dataThreads=[], routeThreads=new Map(), pins=new Set(), stars=new Set(), activeRoots=[], colors=new Map(), archived=new Set(), curOpenUuid="";
+    let shell=null, collapsed=false, search="", groupState=Object.create(null), dataThreads=[], routeThreads=new Map(), pins=new Set(), stars=new Set(), activeRoots=[], colors=new Map(), archived=new Set(), pinOff=new Set(), starOff=new Set(), unarchived=new Set(), curOpenUuid="";
     let filterState={types:[],age:0};
     const rowMap=new WeakMap();  // row element -> thread; delegated .coxList handlers read this so clicks survive the list re-render
     let interacting=false;       // true while the pointer is down on the list — freezes render() so the pressed row is not destroyed mid-click
-    try{ collapsed=localStorage.getItem(COLLAPSED_KEY)==="true"; groupState=JSON.parse(localStorage.getItem(GROUP_KEY)||"{}")||{}; pins=new Set(JSON.parse(localStorage.getItem(PIN_KEY)||"[]")); stars=new Set(JSON.parse(localStorage.getItem(STAR_KEY)||"[]")); colors=new Map(Object.entries(JSON.parse(localStorage.getItem(COLOR_KEY)||"{}"))); archived=new Set(JSON.parse(localStorage.getItem(ARCH_KEY)||"[]")); filterState=Object.assign(filterState,JSON.parse(localStorage.getItem(FILTER_KEY)||"{}")); }catch{}
+    try{ collapsed=localStorage.getItem(COLLAPSED_KEY)==="true"; groupState=JSON.parse(localStorage.getItem(GROUP_KEY)||"{}")||{}; pins=new Set(JSON.parse(localStorage.getItem(PIN_KEY)||"[]")); stars=new Set(JSON.parse(localStorage.getItem(STAR_KEY)||"[]")); pinOff=new Set(JSON.parse(localStorage.getItem(PIN_OFF_KEY)||"[]")); starOff=new Set(JSON.parse(localStorage.getItem(STAR_OFF_KEY)||"[]")); colors=new Map(Object.entries(JSON.parse(localStorage.getItem(COLOR_KEY)||"{}"))); archived=new Set(JSON.parse(localStorage.getItem(ARCH_KEY)||"[]")); filterState=Object.assign(filterState,JSON.parse(localStorage.getItem(FILTER_KEY)||"{}")); }catch{}
     const saveSet=(k,s)=>{ try{ localStorage.setItem(k,JSON.stringify([...s])); }catch{} };
     const saveColors=()=>{ try{ localStorage.setItem(COLOR_KEY,JSON.stringify(Object.fromEntries(colors))); }catch{} };
     const saveFilter=()=>{ try{ localStorage.setItem(FILTER_KEY,JSON.stringify(filterState)); }catch{} };
     const clean=(v)=>String(v||"").replace(/\s+/g," ").trim();
     const pick=(o,keys)=>{ for(const k of keys){ if(o&&o[k]!=null) return o[k]; } return undefined; };
-    const isPinned=(t)=>pins.has(t.id)||t.pinned;
-    const isStarred=(t)=>stars.has(t.id)||t.starred;
+    // Effective state: the local Set wins; a flag the host reports (t.pinned / t.starred, native or title-derived)
+    // counts until the user clears it here (pinOff / starOff), so unpin and unstar really take effect.
+    const isPinned=(t)=>pins.has(t.id)||(!!t.pinned&&!pinOff.has(t.id));
+    const isStarred=(t)=>stars.has(t.id)||(!!t.starred&&!starOff.has(t.id));
+    const isArchived=(t)=>archived.has(t.id)||(!!(t.raw&&t.raw.archived===true)&&!unarchived.has(t.id));
+    // One owner for pin/star toggling: the context menu and the row action bar both call these.
+    function setPinned(t,on){ if(on){ pins.add(t.id); pinOff.delete(t.id); stars.delete(t.id); if(t.starred) starOff.add(t.id); } else { pins.delete(t.id); if(t.pinned) pinOff.add(t.id); } saveSet(PIN_KEY,pins); saveSet(PIN_OFF_KEY,pinOff); saveSet(STAR_KEY,stars); saveSet(STAR_OFF_KEY,starOff); }
+    function setStarred(t,on){ if(on){ stars.add(t.id); starOff.delete(t.id); pins.delete(t.id); if(t.pinned) pinOff.add(t.id); } else { stars.delete(t.id); if(t.starred) starOff.add(t.id); } saveSet(STAR_KEY,stars); saveSet(STAR_OFF_KEY,starOff); saveSet(PIN_KEY,pins); saveSet(PIN_OFF_KEY,pinOff); }
     // Host channel: Codex calls acquireVsCodeApi() exactly once; the patcher tees that
     // single instance into window.__codexOrbitVsApi (see expose_host_channel). This lets
     // us post the SAME host messages Codex's own code posts (archive-conversation,
@@ -937,10 +943,11 @@ SIDEBAR_IIFE = r"""
       for(const el of rows){
         const elTitle=titleKey(el.getAttribute(A.title)||el.textContent||"");
         if(elTitle===want) return el;
-        // Fuzzy match: one contains the other
-        if(elTitle&&want&&(elTitle.includes(want)||want.includes(elTitle))) return el;
       }
-      return null;
+      // Fuzzy fallback (one title contains the other) only when it names exactly one row:
+      // a similar title on another task must not win.
+      const fuzzy=[...rows].filter((el)=>{ const k=titleKey(el.getAttribute(A.title)||el.textContent||""); return k&&want&&(k.includes(want)||want.includes(k)); });
+      return fuzzy.length===1?fuzzy[0]:null;
     }
     function openThread(t){
       const path=threadPath(t);
@@ -969,9 +976,9 @@ SIDEBAR_IIFE = r"""
       // Codex-style: Pin / Star / Archive, then a color swatch row. Open was redundant
       // (clicking the row opens it); Filter-to-chat and the separate Set-color item are
       // gone; diagnostics stay available only through window.codexOrbitDump().
-      add(isPinned(t)?"Unpin":"Pin",()=>{ if(pins.has(t.id))pins.delete(t.id); else { pins.add(t.id); stars.delete(t.id); } saveSet(PIN_KEY,pins); saveSet(STAR_KEY,stars); });
-      add(isStarred(t)?"Unstar":"Star",()=>{ if(stars.has(t.id))stars.delete(t.id); else { stars.add(t.id); pins.delete(t.id); } saveSet(STAR_KEY,stars); saveSet(PIN_KEY,pins); });
-      add(archived.has(t.id)?"Unarchive":"Archive",()=>archiveThread(t));
+      add(isPinned(t)?"Unpin":"Pin",()=>setPinned(t,!isPinned(t)));
+      add(isStarred(t)?"Unstar":"Star",()=>setStarred(t,!isStarred(t)));
+      add(isArchived(t)?"Unarchive":"Archive",()=>archiveThread(t));
       sep();
       const row=document.createElement("div"); row.className="coxColorRow";
       const cur=colors.get(t.id)||"";
@@ -1009,7 +1016,8 @@ SIDEBAR_IIFE = r"""
     }
     function filterActive(){ const f=filterState; return (f.types&&f.types.length)||f.age; }
     // ---------- usage remaining (Codex's native tray data, Orbit's compact popup) ----------
-    function clampPct(v){ const n=Number(v); if(!isFinite(n)) return null; const p=(n>=0&&n<=1)?n*100:n; return Math.max(0,Math.min(100,Math.round(p))); }
+    // Every percent field read through here is on a 0-100 scale (used_percent, remaining_percent, "45%" labels).
+    function clampPct(v){ const n=Number(v); if(!isFinite(n)) return null; return Math.max(0,Math.min(100,Math.round(n))); }
     function num(o,keys){ for(const k of keys){ const v=o&&o[k]; if(v!=null&&v!==""&&!isNaN(Number(v))) return Number(v); } return null; }
     function val(o,keys){ for(const k of keys){ if(o&&o[k]!=null&&o[k]!=="") return o[k]; } return null; }
     function resetMs(v){ if(v==null||v==="") return 0; if(typeof v==="number") return v<1e12?v*1000:v; const n=Date.parse(v); return isNaN(n)?0:n; }
@@ -1308,13 +1316,14 @@ SIDEBAR_IIFE = r"""
       // Toggle. Codex's own command (our history patch uses archive-conversation); post
       // both envelope shapes to maximise acceptance, plus an optimistic local move into/out
       // of the Archived section so OUR list updates at once — and it stays reversible.
-      if(archived.has(t.id)){ archived.delete(t.id); coxPost("unarchive-conversation",{conversationId:t.id}); coxPost("unarchive-conversation",{params:{conversationId:t.id}}); }
-      else { archived.add(t.id); coxPost("archive-conversation",{conversationId:t.id}); coxPost("archive-conversation",{params:{conversationId:t.id}}); }
+      // Same effective state as the render (isArchived): a host-archived task is unarchived by one toggle.
+      if(isArchived(t)){ archived.delete(t.id); if(t.raw&&t.raw.archived===true) unarchived.add(t.id); coxPost("unarchive-conversation",{conversationId:t.id}); coxPost("unarchive-conversation",{params:{conversationId:t.id}}); }
+      else { archived.add(t.id); unarchived.delete(t.id); coxPost("archive-conversation",{conversationId:t.id}); coxPost("archive-conversation",{params:{conversationId:t.id}}); }
       saveSet(ARCH_KEY,archived); render();
     }
     function rowAction(act,t,ev){
-      if(act==="star"){ if(stars.has(t.id))stars.delete(t.id); else { stars.add(t.id); pins.delete(t.id); } saveSet(STAR_KEY,stars); saveSet(PIN_KEY,pins); render(); }
-      else if(act==="pin"){ if(pins.has(t.id))pins.delete(t.id); else { pins.add(t.id); stars.delete(t.id); } saveSet(PIN_KEY,pins); saveSet(STAR_KEY,stars); render(); }
+      if(act==="star"){ setStarred(t,!isStarred(t)); render(); }
+      else if(act==="pin"){ setPinned(t,!isPinned(t)); render(); }
       else if(act==="color"){ showColorMenu(ev.clientX,ev.clientY,t); }
       else if(act==="archive"){ archiveThread(t); }
     }
@@ -1343,7 +1352,7 @@ SIDEBAR_IIFE = r"""
       main.append(tt,sub);
       const acts=document.createElement("span"); acts.className="coxActs";
       const mk=(act,title,svg,on)=>{ const x=document.createElement("button"); x.type="button"; x.className="coxAct"+(on?" on":""); x.title=title; x.dataset.coxAct=act; x.innerHTML=svg; acts.appendChild(x); };
-      const arch=archived.has(t.id);
+      const arch=isArchived(t);
       mk("star",isStarred(t)?"Unstar":"Star",IC.star,isStarred(t));
       mk("pin",isPinned(t)?"Unpin":"Pin",IC.pin,isPinned(t));
       mk("color","Set color",IC.dot,!!col);
@@ -1387,7 +1396,7 @@ SIDEBAR_IIFE = r"""
       const fb=side.querySelector(".coxFilter"); if(fb) fb.classList.toggle("on",!!filterActive());
       // Archived chats (ours + any Codex flags) drop into their own section at the bottom,
       // like Codex's native "Archived" group — not removed.
-      const isArch=(t)=>archived.has(t.id)||(t.raw&&t.raw.archived===true);
+      const isArch=isArchived;
       const arch=rows.filter(isArch); rows=rows.filter((t)=>!isArch(t));
       list.textContent="";
       if(!rows.length&&!arch.length){ const e=document.createElement("div"); e.className="coxEmpty"; e.textContent=search?"No matching chats.":(filterActive()?"No chats match the filter.":"No chats found yet."); list.appendChild(e); return; }
@@ -1642,11 +1651,11 @@ def copy_patched_assets(extension_dir, patcher_version):
     if feature_on("status-dots"):
         expose_status_stream(wv)
     else:
-        log("Skipping status-dots (patch disabled) — rows show relative time only")
+        log("Skipping status-dots stream hook (patch disabled) — row status still comes from the sidebar's own data")
     if feature_on("workspace-filter"):
         inject_workspace_meta(ext)
     else:
-        log("Skipping workspace-filter (patch disabled) — sidebar shows every project")
+        log("Skipping workspace-filter host stamp (patch disabled) — the sidebar still filters by open chat, roots and project labels")
     inject_agents_opener(ext)
     text = helper.read_text(encoding="utf-8", errors="ignore")
     if "__codexOrbitSidebarV4" not in text:
@@ -1913,6 +1922,22 @@ AGENTS_OPEN_CASE = (
 )
 
 
+def host_bundle(ext):
+    """The extension host bundle. Injectors PATCH it and verify() CHECKS it, so both must resolve
+    the same file: package.json main first, then the conventional paths. Returns a path that may
+    not exist when none of them does."""
+    try:
+        main_rel = (json.loads((ext / "package.json").read_text(encoding="utf-8")).get("main") or "out/extension.js")
+    except Exception:
+        main_rel = "out/extension.js"
+    host = ext / main_rel.lstrip("./")
+    if not host.exists():
+        for cand in ("out/extension.js", "dist/extension.js", "extension.js"):
+            if (ext / cand).exists():
+                return ext / cand
+    return host
+
+
 def inject_workspace_meta(ext):
     """Stamp the REAL VS Code workspace into the webview HTML so the sidebar never has
     to guess which project is "home". The extension HOST knows it for certain
@@ -1923,17 +1948,9 @@ def inject_workspace_meta(ext):
     present on every view, before any chat opens. CSP-safe: the webview CSP is
     `script-src ${cspSource}` with no inline/nonce, so an injected <script> would be
     blocked, but a <meta> tag is fine and the sidebar reads it via getAttribute."""
-    try:
-        main_rel = (json.loads((ext / "package.json").read_text(encoding="utf-8")).get("main") or "out/extension.js")
-    except Exception:
-        main_rel = "out/extension.js"
-    host = ext / main_rel.lstrip("./")
+    host = host_bundle(ext)
     if not host.exists():
-        for cand in ("out/extension.js", "dist/extension.js", "extension.js"):
-            if (ext / cand).exists():
-                host = ext / cand; break
-    if not host.exists():
-        log(f"Host bundle not found ({main_rel}); workspace <meta> NOT injected — sidebar uses webview-side fallbacks")
+        log(f"Host bundle not found ({host.name}); workspace <meta> NOT injected — sidebar uses webview-side fallbacks")
         return False
     text = host.read_text(encoding="utf-8", errors="ignore")
     if "codex-orbit-workspace" in text:
@@ -1949,17 +1966,9 @@ def inject_workspace_meta(ext):
 
 def inject_agents_opener(ext):
     """Add a tiny Codex host message so the sidebar can open/create AGENTS.md."""
-    try:
-        main_rel = (json.loads((ext / "package.json").read_text(encoding="utf-8")).get("main") or "out/extension.js")
-    except Exception:
-        main_rel = "out/extension.js"
-    host = ext / main_rel.lstrip("./")
+    host = host_bundle(ext)
     if not host.exists():
-        for cand in ("out/extension.js", "dist/extension.js", "extension.js"):
-            if (ext / cand).exists():
-                host = ext / cand; break
-    if not host.exists():
-        log(f"Host bundle not found ({main_rel}); AGENTS.md opener NOT injected")
+        log(f"Host bundle not found ({host.name}); AGENTS.md opener NOT injected")
         return False
     text = host.read_text(encoding="utf-8", errors="ignore")
     if "codex-orbit-save-agents" in text:
@@ -1971,6 +1980,18 @@ def inject_agents_opener(ext):
     host.write_text(text.replace(AGENTS_OPEN_ANCHOR, AGENTS_OPEN_CASE + AGENTS_OPEN_ANCHOR, 1), encoding="utf-8", newline="")
     log(f"Injected AGENTS.md opener into host bundle {host.name}")
     return True
+
+
+def injected_chunks(ext_dir, marker):
+    """Every webview chunk that carries an injected marker. Each one is checked, not just the first:
+    the sidebar IIFE also names the hook, so a first-match lookup can pick the sidebar host instead.
+    The markers are injection-only text (a call / a dispatch), which the sidebar never contains."""
+    return sorted(p for p in (ext_dir / "webview" / "assets").glob("*.js")
+                  if not p.name.endswith(".map") and marker in p.read_text(encoding="utf-8", errors="ignore"))
+
+
+STATUS_HOOK_CALL = "__codexOrbitStatusHook(e,r)"
+USAGE_ROWS_EVENT = 'new CustomEvent("codex-orbit-usage-rows"'
 
 
 def verify(ext_dir):
@@ -2003,8 +2024,8 @@ def verify(ext_dir):
     # Codex extension (not just the sidebar), so this is the higher-stakes check; and we
     # confirm the workspace <meta> stamp actually landed so a missed anchor is visible
     # in the log instead of silently shipping the old "shows all projects" behaviour.
-    host = next((ext_dir / c for c in ("out/extension.js", "dist/extension.js", "extension.js") if (ext_dir / c).exists()), None)
-    if node and host:
+    host = host_bundle(ext_dir)
+    if node and host.exists():
         rh = subprocess.run([node, "--check", str(host)], capture_output=True, text=True, encoding="utf-8")
         if rh.returncode != 0:
             tail = (rh.stderr or "").strip().splitlines()
@@ -2016,28 +2037,21 @@ def verify(ext_dir):
     # Strict-check the status chunk we hooked (an ESM webview chunk — a broken one would break
     # Codex's conversation engine, not just our sidebar). Same strict module parser as the helper.
     if node:
-        sc = next((p for p in (ext_dir / "webview" / "assets").glob("*.js")
-                   if not p.name.endswith(".map") and "__codexOrbitStatusHook" in p.read_text(encoding="utf-8", errors="ignore")), None)
-        if sc:
-            rs = subprocess.run([node, "--input-type=module", "--check", "-"],
-                                input=sc.read_text(encoding="utf-8", errors="ignore"), capture_output=True, text=True, encoding="utf-8")
-            if rs.returncode != 0:
-                tail = (rs.stderr or "").strip().splitlines()
-                raise RuntimeError(f"Patched status chunk invalid ({sc.name}): {' | '.join(tail[-4:]) if tail else '?'}")
-            log("Status chunk syntax check passed; live-status hook confirmed present")
-        else:
-            log("NOTE live-status hook NOT present (updateConversationState anchor missed) — live status stays best-effort")
-        uc = next((p for p in (ext_dir / "webview" / "assets").glob("*.js")
-                   if not p.name.endswith(".map") and "__codexOrbitUsageRows" in p.read_text(encoding="utf-8", errors="ignore")), None)
-        if uc:
-            ru = subprocess.run([node, "--input-type=module", "--check", "-"],
-                                input=uc.read_text(encoding="utf-8", errors="ignore"), capture_output=True, text=True, encoding="utf-8")
-            if ru.returncode != 0:
-                tail = (ru.stderr or "").strip().splitlines()
-                raise RuntimeError(f"Patched usage chunk invalid ({uc.name}): {' | '.join(tail[-4:]) if tail else '?'}")
-            log("Usage chunk syntax check passed; rate-limit rows hook confirmed present")
-        else:
-            log("NOTE usage rows hook NOT present — usage popup falls back to tray/message data")
+        for label, marker, note in (
+            ("Status chunk", STATUS_HOOK_CALL, "NOTE live-status hook NOT present (updateConversationState anchor missed) — live status stays best-effort"),
+            ("Usage chunk", USAGE_ROWS_EVENT, "NOTE usage rows hook NOT present — usage popup falls back to tray/message data"),
+        ):
+            chunks = injected_chunks(ext_dir, marker)
+            if not chunks:
+                log(note)
+                continue
+            for sc in chunks:
+                rs = subprocess.run([node, "--input-type=module", "--check", "-"],
+                                    input=sc.read_text(encoding="utf-8", errors="ignore"), capture_output=True, text=True, encoding="utf-8")
+                if rs.returncode != 0:
+                    tail = (rs.stderr or "").strip().splitlines()
+                    raise RuntimeError(f"Patched {label.lower()} invalid ({sc.name}): {' | '.join(tail[-4:]) if tail else '?'}")
+            log(f"{label} syntax check passed ({len(chunks)} file(s)); injected hook confirmed present")
 
 
 def zip_dir(src, dest):

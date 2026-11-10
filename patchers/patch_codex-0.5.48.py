@@ -477,6 +477,9 @@ SIDEBAR_IIFE = r"""
          if(c.wid&&wid&&c.wid===wid){ curRoot=c.r||""; curLabel=c.l||""; }
     }catch{}
     function setCurrent(root,label){
+      // The host meta is authoritative (setFromHost). Open-chat, roots and active-flag
+      // signals must not narrow or flip it, so they are ignored while it is present.
+      if(hostWorkspace()) return;
       const r=normPath(root||""), l=clean(label||"").toLowerCase();
       let ch=false;
       if(r&&r!==curRoot){ curRoot=r; ch=true; }
@@ -1894,19 +1897,19 @@ AGENTS_OPEN_CASE = (
     'case"codex-orbit-read-agents":{let n=r.scope==="global"?"global":"project",o="",i="",s=!1,a=null;'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):""}'
     'if(o)try{i=await iC.promises.readFile(o,"utf8"),s=!0}catch(c){let l=c;if(!("code"in l&&l.code==="ENOENT"))a=String(l&&l.message||l)}'
     'this.postMessageToWebview(e,{type:"codex-orbit-agents-file",scope:n,path:o,content:i,exists:s,error:a});break}'
     'case"codex-orbit-save-agents":{let n=r.scope==="global"?"global":"project",o="",i=typeof r.content==="string"?r.content:"",s=null;'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):""}'
     'if(o)try{await iC.promises.mkdir(nde.dirname(o),{recursive:!0});await iC.promises.writeFile(o,i,"utf8")}catch(a){s=String(a&&a.message||a)}else s="No workspace folder";'
     'this.postMessageToWebview(e,{type:"codex-orbit-agents-saved",scope:n,path:o,content:i,exists:!s,error:s});break}'
     'case"codex-orbit-open-agents":{let n=r.scope==="global"?"global":"project",o="";'
     'if(n==="global"){let i=At({preferWsl:pr()});o=nde.join(i,"AGENTS.md")}'
     'else{let i=Oe.workspace.workspaceFolders&&Oe.workspace.workspaceFolders[0];'
-    'o=typeof r.path==="string"&&r.path?r.path:(i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):"")}'
+    'o=i&&i.uri?nde.join(i.uri.fsPath,"AGENTS.md"):""}'
     'if(o){await iC.promises.mkdir(nde.dirname(o),{recursive:!0});'
     'try{await iC.promises.access(o)}catch(i){let s=i;if("code"in s&&s.code==="ENOENT")await iC.promises.writeFile(o,"");else throw i}'
     'await Oe.commands.executeCommand("vscode.open",Oe.Uri.file(o))}break}'

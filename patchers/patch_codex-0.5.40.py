@@ -1345,11 +1345,11 @@ def copy_patched_assets(extension_dir, patcher_version):
     if feature_on("status-dots"):
         expose_status_stream(wv)
     else:
-        log("Skipping status-dots (patch disabled) — rows show relative time only")
+        log("Skipping status-dots hook (patch disabled) — rows still show status dots from the wire data")
     if feature_on("workspace-filter"):
         inject_workspace_meta(ext)
     else:
-        log("Skipping workspace-filter (patch disabled) — sidebar shows every project")
+        log("Skipping workspace-filter host meta (patch disabled) — sidebar still scopes by open chat, saved workspace and roots")
     inject_agents_opener(ext)
     text = helper.read_text(encoding="utf-8", errors="ignore")
     if "__codexOrbitSidebarV4" not in text:

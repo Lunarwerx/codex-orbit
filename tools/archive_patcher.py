@@ -34,7 +34,8 @@ EXT_NAME = "codex-orbit"
 def read_version(path: Path, label: str) -> str:
     if not path.exists():
         raise SystemExit(f"Missing {label}: {path}")
-    v = path.read_text(encoding="utf-8").strip().split()[0]
+    tokens = path.read_text(encoding="utf-8").strip().split()
+    v = tokens[0] if tokens else ""
     if not v:
         raise SystemExit(f"{label} is empty: {path}")
     return v
